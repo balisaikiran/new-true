@@ -1,0 +1,14 @@
+# Vercel ignore file
+node_modules/
+.env
+.env.local
+.vercel
+*.log
+__pycache__/
+*.pyc
+.venv/
+venv/
+frontend/build/
+frontend/node_modules/
+backend/__pycache__/
+

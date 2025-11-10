@@ -14,7 +14,11 @@ import asyncio
 
 
 ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
+# Try to load .env file if it exists (for local development)
+env_file = ROOT_DIR / '.env'
+if env_file.exists():
+    load_dotenv(env_file)
+# For Vercel, environment variables are already set
 
 # MongoDB connection
 mongo_url = os.environ['MONGO_URL']

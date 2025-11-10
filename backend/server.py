@@ -117,14 +117,26 @@ async def get_truedata_token(username: str, password: str) -> Dict[str, Any]:
                 headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
             
+            logger.info(f"TrueData auth response status: {response.status_code}")
+            
             if response.status_code == 200:
                 return response.json()
             else:
-                logger.error(f"TrueData auth failed: {response.status_code} - {response.text}")
-                return {"error": "Authentication failed", "status_code": response.status_code}
+                error_text = response.text
+                logger.error(f"TrueData auth failed: {response.status_code} - {error_text}")
+                # Try to parse error message
+                try:
+                    error_json = response.json()
+                    error_msg = error_json.get('error_description') or error_json.get('error') or "Authentication failed"
+                except:
+                    error_msg = error_text or "Authentication failed"
+                return {"error": error_msg, "status_code": response.status_code}
+    except httpx.TimeoutException:
+        logger.error("TrueData auth timeout")
+        return {"error": "Request timeout. Please try again."}
     except Exception as e:
         logger.error(f"Error authenticating with TrueData: {str(e)}")
-        return {"error": str(e)}
+        return {"error": f"Connection error: {str(e)}"}
 
 
 async def fetch_ltp_spot(token: str, symbol: str, series: str = "EQ") -> Optional[float]:

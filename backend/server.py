@@ -20,10 +20,36 @@ if env_file.exists():
     load_dotenv(env_file)
 # For Vercel, environment variables are already set
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+# MongoDB connection with better error handling
+try:
+    mongo_url = os.environ.get('MONGO_URL')
+    db_name = os.environ.get('DB_NAME')
+    
+    if not mongo_url:
+        raise ValueError("MONGO_URL environment variable is not set")
+    if not db_name:
+        raise ValueError("DB_NAME environment variable is not set")
+    
+    logger.info(f"Connecting to MongoDB database: {db_name}")
+    client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
+    db = client[db_name]
+    
+    # Test connection
+    async def test_mongo_connection():
+        try:
+            await client.admin.command('ping')
+            logger.info("MongoDB connection successful")
+        except Exception as e:
+            logger.error(f"MongoDB connection failed: {str(e)}")
+            raise
+    
+    # Note: This will be called on first request in serverless environment
+    
+except Exception as e:
+    logger.error(f"Failed to initialize MongoDB: {str(e)}")
+    # Create a dummy client to prevent app crash, but log the error
+    client = None
+    db = None
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -256,11 +282,15 @@ async def login(request: LoginRequest):
         }
         
         # Upsert token
-        await db.tokens.update_one(
-            {"username": request.username},
-            {"$set": token_doc},
-            upsert=True
-        )
+        if db is None:
+            logger.error("MongoDB not initialized - cannot store token")
+            # Continue without storing in DB (for development/testing)
+        else:
+            await db.tokens.update_one(
+                {"username": request.username},
+                {"$set": token_doc},
+                upsert=True
+            )
         
         return LoginResponse(
             success=True,
@@ -336,6 +366,32 @@ async def root():
     return {"message": "TrueData Analytics API"}
 
 
+@api_router.get("/test-db")
+async def test_db():
+    """Test MongoDB connection"""
+    if not client or not db:
+        return {
+            "status": "error",
+            "message": "MongoDB client not initialized",
+            "mongo_url_set": bool(os.environ.get('MONGO_URL')),
+            "db_name_set": bool(os.environ.get('DB_NAME'))
+        }
+    
+    try:
+        await client.admin.command('ping')
+        return {
+            "status": "connected",
+            "database": os.environ.get('DB_NAME'),
+            "message": "MongoDB connection successful"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "error_type": type(e).__name__
+        }
+
+
 # Include the router in the main app
 app.include_router(api_router)
 
@@ -350,4 +406,5 @@ app.add_middleware(
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    client.close()
+    if client:
+        client.close()

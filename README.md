@@ -64,3 +64,4 @@ A professional F&O (Futures & Options) market analytics dashboard built with Rea
 4. **Theme**: Click sun/moon icon to switch themes
 5. **Option Chain**: Click "View" next to any symbol to see option chain data
 6. **Logout**: Click "Logout" to end session
+# new-true

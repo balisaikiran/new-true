@@ -20,49 +20,39 @@ if env_file.exists():
     load_dotenv(env_file)
 # For Vercel, environment variables are already set
 
-# MongoDB connection with better error handling
-try:
-    mongo_url = os.environ.get('MONGO_URL')
-    db_name = os.environ.get('DB_NAME')
-    
-    if not mongo_url:
-        raise ValueError("MONGO_URL environment variable is not set")
-    if not db_name:
-        raise ValueError("DB_NAME environment variable is not set")
-    
-    logger.info(f"Connecting to MongoDB database: {db_name}")
-    client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
-    db = client[db_name]
-    
-    # Test connection
-    async def test_mongo_connection():
-        try:
-            await client.admin.command('ping')
-            logger.info("MongoDB connection successful")
-        except Exception as e:
-            logger.error(f"MongoDB connection failed: {str(e)}")
-            raise
-    
-    # Note: This will be called on first request in serverless environment
-    
-except Exception as e:
-    logger.error(f"Failed to initialize MongoDB: {str(e)}")
-    # Create a dummy client to prevent app crash, but log the error
-    client = None
-    db = None
+# Configure logging first (needed for MongoDB connection logging)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# MongoDB connection with better error handling (optional)
+# MongoDB is only used for storing login tokens - app works without it
+mongo_url = os.environ.get('MONGO_URL')
+db_name = os.environ.get('DB_NAME')
+
+client = None
+db = None
+
+if mongo_url and db_name:
+    try:
+        logger.info(f"Connecting to MongoDB database: {db_name}")
+        client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
+        db = client[db_name]
+        logger.info("MongoDB initialized successfully")
+    except Exception as e:
+        logger.warning(f"MongoDB connection failed (app will work without it): {str(e)}")
+        client = None
+        db = None
+else:
+    logger.info("MongoDB not configured - app will run without database (tokens stored in localStorage on frontend)")
 
 # Create the main app without a prefix
 app = FastAPI()
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # TrueData API URLs
 TRUEDATA_AUTH_URL = "https://auth.truedata.in/token"

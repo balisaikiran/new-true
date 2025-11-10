@@ -106,37 +106,56 @@ class OptionChainResponse(BaseModel):
 async def get_truedata_token(username: str, password: str) -> Dict[str, Any]:
     """Authenticate with TrueData API and get access token"""
     try:
+        logger.info(f"Attempting TrueData authentication for user: {username}")
+        
+        # Prepare form data
+        form_data = {
+            "username": username,
+            "password": password,
+            "grant_type": "password"
+        }
+        
+        logger.info(f"TrueData auth URL: {TRUEDATA_AUTH_URL}")
+        logger.info(f"Form data keys: {list(form_data.keys())}")
+        
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 TRUEDATA_AUTH_URL,
-                data={
-                    "username": username,
-                    "password": password,
-                    "grant_type": "password"
-                },
+                data=form_data,
                 headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
             
             logger.info(f"TrueData auth response status: {response.status_code}")
+            logger.info(f"TrueData auth response headers: {dict(response.headers)}")
             
             if response.status_code == 200:
-                return response.json()
+                result = response.json()
+                logger.info("TrueData authentication successful")
+                return result
             else:
                 error_text = response.text
-                logger.error(f"TrueData auth failed: {response.status_code} - {error_text}")
+                logger.error(f"TrueData auth failed: {response.status_code}")
+                logger.error(f"Response text: {error_text[:500]}")  # First 500 chars
+                
                 # Try to parse error message
                 try:
                     error_json = response.json()
-                    error_msg = error_json.get('error_description') or error_json.get('error') or "Authentication failed"
+                    error_msg = error_json.get('error_description') or error_json.get('error') or error_json.get('message') or "Authentication failed"
+                    logger.error(f"Parsed error: {error_msg}")
                 except:
-                    error_msg = error_text or "Authentication failed"
+                    error_msg = error_text[:200] if error_text else "Authentication failed"
+                    logger.error(f"Could not parse error JSON, using raw text: {error_msg}")
+                
                 return {"error": error_msg, "status_code": response.status_code}
     except httpx.TimeoutException:
         logger.error("TrueData auth timeout")
         return {"error": "Request timeout. Please try again."}
-    except Exception as e:
-        logger.error(f"Error authenticating with TrueData: {str(e)}")
+    except httpx.RequestError as e:
+        logger.error(f"TrueData request error: {str(e)}")
         return {"error": f"Connection error: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Error authenticating with TrueData: {str(e)}", exc_info=True)
+        return {"error": f"Unexpected error: {str(e)}"}
 
 
 async def fetch_ltp_spot(token: str, symbol: str, series: str = "EQ") -> Optional[float]:
@@ -266,12 +285,15 @@ async def fetch_stock_data(token: str, symbol: str) -> StockData:
 async def login(request: LoginRequest):
     """Authenticate user with TrueData credentials"""
     try:
+        logger.info(f"Login attempt for username: {request.username}")
         result = await get_truedata_token(request.username, request.password)
         
         if "error" in result:
+            error_msg = result.get("error", "Authentication failed")
+            logger.warning(f"Login failed for {request.username}: {error_msg}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=result["error"]
+                detail=error_msg
             )
         
         # Store token in database for session management
@@ -285,7 +307,7 @@ async def login(request: LoginRequest):
         
         # Upsert token
         if db is None:
-            logger.error("MongoDB not initialized - cannot store token")
+            logger.warning("MongoDB not initialized - cannot store token")
             # Continue without storing in DB (for development/testing)
         else:
             await db.tokens.update_one(
@@ -294,6 +316,7 @@ async def login(request: LoginRequest):
                 upsert=True
             )
         
+        logger.info(f"Login successful for {request.username}")
         return LoginResponse(
             success=True,
             message="Login successful",
@@ -305,7 +328,7 @@ async def login(request: LoginRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Login error: {str(e)}")
+        logger.error(f"Login error: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)

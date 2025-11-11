@@ -1,6 +1,8 @@
 from fastapi import FastAPI, APIRouter, HTTPException, status
-from dotenv import load_dotenv
+from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
@@ -11,6 +13,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 import httpx
 import asyncio
+import traceback
 
 
 ROOT_DIR = Path(__file__).parent
@@ -29,29 +32,47 @@ logger = logging.getLogger(__name__)
 
 # MongoDB connection with better error handling (optional)
 # MongoDB is only used for storing login tokens - app works without it
+# IMPORTANT: Don't block initialization - MongoDB connection is lazy
 client = None
 db = None
 
-try:
-    mongo_url = os.environ.get('MONGO_URL')
-    db_name = os.environ.get('DB_NAME')
+def init_mongodb():
+    """Initialize MongoDB connection (non-blocking, called lazily)"""
+    global client, db
+    if client is not None or db is not None:
+        return  # Already initialized
     
-    if mongo_url and db_name:
-        try:
-            logger.info(f"Connecting to MongoDB database: {db_name}")
-            client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
-            db = client[db_name]
-            logger.info("MongoDB initialized successfully")
-        except Exception as e:
-            logger.warning(f"MongoDB connection failed (app will work without it): {str(e)}")
-            client = None
-            db = None
-    else:
-        logger.info("MongoDB not configured - app will run without database (tokens stored in localStorage on frontend)")
-except Exception as e:
-    logger.error(f"Error initializing MongoDB: {str(e)}")
-    client = None
-    db = None
+    try:
+        mongo_url = os.environ.get('MONGO_URL')
+        db_name = os.environ.get('DB_NAME')
+        
+        if mongo_url and db_name:
+            try:
+                logger.info(f"Connecting to MongoDB database: {db_name}")
+                # Use very short timeout to avoid blocking
+                client = AsyncIOMotorClient(
+                    mongo_url, 
+                    serverSelectionTimeoutMS=2000,
+                    connectTimeoutMS=2000
+                )
+                db = client[db_name]
+                logger.info("MongoDB initialized successfully")
+            except Exception as e:
+                logger.warning(f"MongoDB connection failed (app will work without it): {str(e)}")
+                print(f"MongoDB warning: {str(e)}")  # Also print for Vercel logs
+                client = None
+                db = None
+        else:
+            logger.info("MongoDB not configured - app will run without database")
+            print("MongoDB not configured")
+    except Exception as e:
+        logger.error(f"Error initializing MongoDB: {str(e)}")
+        print(f"MongoDB error: {str(e)}")  # Also print for Vercel logs
+        client = None
+        db = None
+
+# Don't initialize MongoDB during import - do it lazily when needed
+# This prevents blocking during function initialization
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -310,6 +331,10 @@ async def login(request: LoginRequest):
         }
         
         # Upsert token (MongoDB is optional - app works without it)
+        # Try to initialize MongoDB if not already done
+        if client is None and db is None:
+            init_mongodb()
+        
         if db is None:
             logger.warning("MongoDB not initialized - cannot store token (tokens will be stored in frontend localStorage)")
             # Continue without storing in DB (for development/testing)
@@ -405,18 +430,23 @@ async def root():
 @api_router.get("/test-db")
 async def test_db():
     """Test MongoDB connection"""
-    if not client or not db:
-        return {
-            "status": "error",
-            "message": "MongoDB client not initialized",
-            "mongo_url_set": bool(os.environ.get('MONGO_URL')),
-            "db_name_set": bool(os.environ.get('DB_NAME'))
-        }
-    
     try:
+        # Try to initialize MongoDB if not already done
+        if client is None and db is None:
+            init_mongodb()
+        
+        if db is None:
+            return {
+                "status": "not_configured",
+                "message": "MongoDB not configured or connection failed",
+                "mongo_url_set": bool(os.environ.get('MONGO_URL')),
+                "db_name_set": bool(os.environ.get('DB_NAME'))
+            }
+        
+        # Try to ping the database
         await client.admin.command('ping')
         return {
-            "status": "connected",
+            "status": "success",
             "database": os.environ.get('DB_NAME'),
             "message": "MongoDB connection successful"
         }
@@ -426,6 +456,14 @@ async def test_db():
             "message": str(e),
             "error_type": type(e).__name__
         }
+
+@api_router.get("/health")
+async def health_check():
+    """Simple health check endpoint"""
+    return {
+        "status": "ok",
+        "message": "API is running"
+    }
 
 
 # Include the router in the main app
@@ -440,9 +478,6 @@ app.add_middleware(
 )
 
 # Add global exception handler to catch all errors
-from fastapi.responses import JSONResponse
-from starlette.exceptions import HTTPException as StarletteHTTPException
-
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request, exc):
     """Handle HTTP exceptions"""
@@ -460,9 +495,8 @@ async def http_exception_handler(request, exc):
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     """Global exception handler to catch all unhandled exceptions"""
-    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
-    import traceback
     error_trace = traceback.format_exc()
+    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
     logger.error(f"Traceback: {error_trace}")
     print(f"ERROR: {str(exc)}")  # Also print for Vercel logs
     print(error_trace)  # Print traceback for Vercel logs

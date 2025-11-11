@@ -7,12 +7,15 @@
   NODE_VERSION = "18"
   PYTHON_VERSION = "3.11"
 
+# Redirect API routes to Netlify Functions
+# Note: The function name should match the directory name
 [[redirects]]
   from = "/api/*"
-  to = "/.netlify/functions/api/:splat"
+  to = "/.netlify/functions/api"
   status = 200
   force = true
 
+# SPA routing - all other routes go to index.html
 [[redirects]]
   from = "/*"
   to = "/index.html"
@@ -20,4 +23,7 @@
 
 [functions]
   node_bundler = "esbuild"
+  # Python functions configuration
+  included_files = ["backend/**"]
+
 

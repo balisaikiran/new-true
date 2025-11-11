@@ -8,7 +8,7 @@ import traceback
 from pathlib import Path
 
 # Initialize handler to None - will be set below
-handler = None
+mangum_handler = None
 
 # Determine paths for Netlify
 try:
@@ -99,7 +99,7 @@ try:
     # Mangum converts ASGI (FastAPI) to AWS Lambda/Netlify format
     try:
         print("Creating Mangum handler...")
-        handler = Mangum(app, lifespan="off", log_level="info")
+        mangum_handler = Mangum(app, lifespan="off", log_level="info")
         print("✅ Mangum handler created successfully")
     except Exception as e:
         print(f"ERROR: Mangum initialization failed: {e}")
@@ -111,6 +111,7 @@ try:
         async def root():
             return {"error": "Mangum initialization failed", "message": str(e)}
         handler = Mangum(fallback_app, lifespan="off")
+        mangum_handler = handler
         print("Created fallback Mangum handler")
 
     # Handler is ready - Mangum will handle async execution
@@ -143,35 +144,48 @@ except Exception as e:
             }
         
         handler = Mangum(error_app, lifespan="off")
+        mangum_handler = handler
         print("Created error handler app")
     except Exception as e2:
         # Even error handler failed - create a simple lambda-compatible handler
         print(f"ERROR: Failed to create error handler: {e2}")
-        def handler(event, context):
+        def simple_handler(event, context):
             return {
                 "statusCode": 500,
                 "headers": {"Content-Type": "application/json"},
                 "body": '{"error": {"code": "500", "message": "Initialization failed"}}'
             }
+        mangum_handler = simple_handler
         print("Created simple error handler")
 
 # Ensure handler is always defined
-if handler is None:
+if mangum_handler is None:
     print("WARNING: Handler is None, creating emergency handler")
-    def handler(event, context):
+    def emergency_handler(event, context):
         return {
             "statusCode": 500,
             "headers": {"Content-Type": "application/json"},
             "body": '{"error": {"code": "500", "message": "Handler not initialized"}}'
         }
+    mangum_handler = emergency_handler
 
 # Netlify Functions handler
-def netlify_handler(event, context):
+# This is the entry point that Netlify will call
+def handler(event, context):
     """Netlify Functions entry point"""
     try:
-        return handler(event, context)
+        # Call the Mangum handler
+        if mangum_handler is None:
+            return {
+                "statusCode": 500,
+                "headers": {"Content-Type": "application/json"},
+                "body": '{"error": {"code": "500", "message": "Handler not initialized"}}'
+            }
+        
+        # Mangum handler handles async internally - just call it
+        return mangum_handler(event, context)
     except Exception as e:
-        print(f"ERROR in netlify_handler: {e}")
+        print(f"ERROR in handler: {e}")
         print(traceback.format_exc())
         return {
             "statusCode": 500,

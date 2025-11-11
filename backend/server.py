@@ -113,7 +113,7 @@ async def get_truedata_token(username: str, password: str) -> Dict[str, Any]:
     try:
         logger.info(f"Attempting TrueData authentication for user: {username}")
         
-        # Prepare form data
+        # Prepare form data - httpx will automatically URL-encode special characters
         form_data = {
             "username": username,
             "password": password,
@@ -121,9 +121,9 @@ async def get_truedata_token(username: str, password: str) -> Dict[str, Any]:
         }
         
         logger.info(f"TrueData auth URL: {TRUEDATA_AUTH_URL}")
-        logger.info(f"Form data keys: {list(form_data.keys())}")
         
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            # Send form data - httpx automatically URL-encodes special characters
             response = await client.post(
                 TRUEDATA_AUTH_URL,
                 data=form_data,
@@ -131,7 +131,6 @@ async def get_truedata_token(username: str, password: str) -> Dict[str, Any]:
             )
             
             logger.info(f"TrueData auth response status: {response.status_code}")
-            logger.info(f"TrueData auth response headers: {dict(response.headers)}")
             
             if response.status_code == 200:
                 result = response.json()
@@ -140,7 +139,7 @@ async def get_truedata_token(username: str, password: str) -> Dict[str, Any]:
             else:
                 error_text = response.text
                 logger.error(f"TrueData auth failed: {response.status_code}")
-                logger.error(f"Response text: {error_text[:500]}")  # First 500 chars
+                logger.error(f"Response text: {error_text[:500]}")
                 
                 # Try to parse error message
                 try:

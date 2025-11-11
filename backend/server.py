@@ -29,24 +29,29 @@ logger = logging.getLogger(__name__)
 
 # MongoDB connection with better error handling (optional)
 # MongoDB is only used for storing login tokens - app works without it
-mongo_url = os.environ.get('MONGO_URL')
-db_name = os.environ.get('DB_NAME')
-
 client = None
 db = None
 
-if mongo_url and db_name:
-    try:
-        logger.info(f"Connecting to MongoDB database: {db_name}")
-        client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
-        db = client[db_name]
-        logger.info("MongoDB initialized successfully")
-    except Exception as e:
-        logger.warning(f"MongoDB connection failed (app will work without it): {str(e)}")
-        client = None
-        db = None
-else:
-    logger.info("MongoDB not configured - app will run without database (tokens stored in localStorage on frontend)")
+try:
+    mongo_url = os.environ.get('MONGO_URL')
+    db_name = os.environ.get('DB_NAME')
+    
+    if mongo_url and db_name:
+        try:
+            logger.info(f"Connecting to MongoDB database: {db_name}")
+            client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
+            db = client[db_name]
+            logger.info("MongoDB initialized successfully")
+        except Exception as e:
+            logger.warning(f"MongoDB connection failed (app will work without it): {str(e)}")
+            client = None
+            db = None
+    else:
+        logger.info("MongoDB not configured - app will run without database (tokens stored in localStorage on frontend)")
+except Exception as e:
+    logger.error(f"Error initializing MongoDB: {str(e)}")
+    client = None
+    db = None
 
 # Create the main app without a prefix
 app = FastAPI()

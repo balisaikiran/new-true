@@ -309,16 +309,23 @@ async def login(request: LoginRequest):
             "expires_at": (datetime.now(timezone.utc) + timedelta(seconds=result.get("expires_in", 3600))).isoformat()
         }
         
-        # Upsert token
+        # Upsert token (MongoDB is optional - app works without it)
         if db is None:
-            logger.warning("MongoDB not initialized - cannot store token")
+            logger.warning("MongoDB not initialized - cannot store token (tokens will be stored in frontend localStorage)")
             # Continue without storing in DB (for development/testing)
         else:
-            await db.tokens.update_one(
-                {"username": request.username},
-                {"$set": token_doc},
-                upsert=True
-            )
+            try:
+                # Use 'tokens' collection (will be created automatically if it doesn't exist)
+                await db.tokens.update_one(
+                    {"username": request.username},
+                    {"$set": token_doc},
+                    upsert=True
+                )
+                logger.info(f"Token stored in MongoDB for {request.username}")
+            except Exception as e:
+                # Don't fail login if MongoDB storage fails
+                logger.warning(f"Failed to store token in MongoDB (non-critical): {str(e)}")
+                # Continue - token will be stored in frontend localStorage
         
         logger.info(f"Login successful for {request.username}")
         return LoginResponse(

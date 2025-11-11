@@ -93,7 +93,7 @@ if app is None:
 # Mangum converts ASGI (FastAPI) to AWS Lambda/Vercel format
 try:
     print("Creating Mangum handler...")
-    handler = Mangum(app, lifespan="off")
+    handler = Mangum(app, lifespan="off", log_level="info")
     print("✅ Mangum handler created successfully")
 except Exception as e:
     print(f"ERROR: Mangum initialization failed: {e}")
@@ -106,3 +106,7 @@ except Exception as e:
         return {"error": "Mangum initialization failed", "message": str(e)}
     handler = Mangum(fallback_app, lifespan="off")
     print("Created fallback Mangum handler")
+
+# Handler is ready - Mangum will handle async execution
+# Global exception handler in FastAPI will catch all errors
+print("✅ Vercel function handler ready")

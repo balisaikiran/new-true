@@ -439,6 +439,46 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add global exception handler to catch all errors
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request, exc):
+    """Handle HTTP exceptions"""
+    logger.error(f"HTTP exception: {exc.status_code} - {exc.detail}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": {
+                "code": str(exc.status_code),
+                "message": str(exc.detail)
+            }
+        }
+    )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """Global exception handler to catch all unhandled exceptions"""
+    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+    import traceback
+    error_trace = traceback.format_exc()
+    logger.error(f"Traceback: {error_trace}")
+    print(f"ERROR: {str(exc)}")  # Also print for Vercel logs
+    print(error_trace)  # Print traceback for Vercel logs
+    
+    # Return proper error response
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "code": "500",
+                "message": str(exc),
+                "type": type(exc).__name__
+            }
+        }
+    )
+
 
 @app.on_event("shutdown")
 async def shutdown_db_client():

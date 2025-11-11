@@ -7,8 +7,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { toast } from "sonner";
 import { TrendingUp, Lock } from "lucide-react";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || window.location.origin;
 const API = `${BACKEND_URL}/api`;
+
+// Debug: Log backend URL (remove in production)
+if (process.env.NODE_ENV === 'development') {
+  console.log('Backend URL:', BACKEND_URL);
+  console.log('API URL:', API);
+}
 
 const LoginPage = ({ onLogin }) => {
   const [username, setUsername] = useState("");
@@ -43,8 +49,25 @@ const LoginPage = ({ onLogin }) => {
       }
     } catch (error) {
       console.error("Login error:", error);
-      const errorMessage =
-        error.response?.data?.detail || "Invalid credentials. Please try again.";
+      console.error("Error response:", error.response);
+      console.error("Request URL:", `${API}/auth/login`);
+      
+      let errorMessage = "Invalid credentials. Please try again.";
+      
+      if (error.response) {
+        // Server responded with error
+        errorMessage = error.response.data?.detail || error.response.data?.message || errorMessage;
+        console.error("Server error:", error.response.status, errorMessage);
+      } else if (error.request) {
+        // Request made but no response
+        errorMessage = `Cannot connect to server. Please check if backend is running at ${BACKEND_URL}`;
+        console.error("No response from server:", error.request);
+      } else {
+        // Error setting up request
+        errorMessage = `Request error: ${error.message}`;
+        console.error("Request setup error:", error.message);
+      }
+      
       toast.error(errorMessage);
     } finally {
       setLoading(false);

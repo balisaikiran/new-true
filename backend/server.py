@@ -20,23 +20,44 @@ if env_file.exists():
     load_dotenv(env_file)
 # For Vercel, environment variables are already set
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+# Configure logging first (needed for MongoDB connection logging)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# MongoDB connection with better error handling (optional)
+# MongoDB is only used for storing login tokens - app works without it
+client = None
+db = None
+
+try:
+    mongo_url = os.environ.get('MONGO_URL')
+    db_name = os.environ.get('DB_NAME')
+    
+    if mongo_url and db_name:
+        try:
+            logger.info(f"Connecting to MongoDB database: {db_name}")
+            client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
+            db = client[db_name]
+            logger.info("MongoDB initialized successfully")
+        except Exception as e:
+            logger.warning(f"MongoDB connection failed (app will work without it): {str(e)}")
+            client = None
+            db = None
+    else:
+        logger.info("MongoDB not configured - app will run without database (tokens stored in localStorage on frontend)")
+except Exception as e:
+    logger.error(f"Error initializing MongoDB: {str(e)}")
+    client = None
+    db = None
 
 # Create the main app without a prefix
 app = FastAPI()
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # TrueData API URLs
 TRUEDATA_AUTH_URL = "https://auth.truedata.in/token"
@@ -90,25 +111,56 @@ class OptionChainResponse(BaseModel):
 async def get_truedata_token(username: str, password: str) -> Dict[str, Any]:
     """Authenticate with TrueData API and get access token"""
     try:
+        logger.info(f"Attempting TrueData authentication for user: {username}")
+        
+        # Prepare form data
+        form_data = {
+            "username": username,
+            "password": password,
+            "grant_type": "password"
+        }
+        
+        logger.info(f"TrueData auth URL: {TRUEDATA_AUTH_URL}")
+        logger.info(f"Form data keys: {list(form_data.keys())}")
+        
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 TRUEDATA_AUTH_URL,
-                data={
-                    "username": username,
-                    "password": password,
-                    "grant_type": "password"
-                },
+                data=form_data,
                 headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
             
+            logger.info(f"TrueData auth response status: {response.status_code}")
+            logger.info(f"TrueData auth response headers: {dict(response.headers)}")
+            
             if response.status_code == 200:
-                return response.json()
+                result = response.json()
+                logger.info("TrueData authentication successful")
+                return result
             else:
-                logger.error(f"TrueData auth failed: {response.status_code} - {response.text}")
-                return {"error": "Authentication failed", "status_code": response.status_code}
+                error_text = response.text
+                logger.error(f"TrueData auth failed: {response.status_code}")
+                logger.error(f"Response text: {error_text[:500]}")  # First 500 chars
+                
+                # Try to parse error message
+                try:
+                    error_json = response.json()
+                    error_msg = error_json.get('error_description') or error_json.get('error') or error_json.get('message') or "Authentication failed"
+                    logger.error(f"Parsed error: {error_msg}")
+                except:
+                    error_msg = error_text[:200] if error_text else "Authentication failed"
+                    logger.error(f"Could not parse error JSON, using raw text: {error_msg}")
+                
+                return {"error": error_msg, "status_code": response.status_code}
+    except httpx.TimeoutException:
+        logger.error("TrueData auth timeout")
+        return {"error": "Request timeout. Please try again."}
+    except httpx.RequestError as e:
+        logger.error(f"TrueData request error: {str(e)}")
+        return {"error": f"Connection error: {str(e)}"}
     except Exception as e:
-        logger.error(f"Error authenticating with TrueData: {str(e)}")
-        return {"error": str(e)}
+        logger.error(f"Error authenticating with TrueData: {str(e)}", exc_info=True)
+        return {"error": f"Unexpected error: {str(e)}"}
 
 
 async def fetch_ltp_spot(token: str, symbol: str, series: str = "EQ") -> Optional[float]:
@@ -238,12 +290,15 @@ async def fetch_stock_data(token: str, symbol: str) -> StockData:
 async def login(request: LoginRequest):
     """Authenticate user with TrueData credentials"""
     try:
+        logger.info(f"Login attempt for username: {request.username}")
         result = await get_truedata_token(request.username, request.password)
         
         if "error" in result:
+            error_msg = result.get("error", "Authentication failed")
+            logger.warning(f"Login failed for {request.username}: {error_msg}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=result["error"]
+                detail=error_msg
             )
         
         # Store token in database for session management
@@ -256,12 +311,17 @@ async def login(request: LoginRequest):
         }
         
         # Upsert token
-        await db.tokens.update_one(
-            {"username": request.username},
-            {"$set": token_doc},
-            upsert=True
-        )
+        if db is None:
+            logger.warning("MongoDB not initialized - cannot store token")
+            # Continue without storing in DB (for development/testing)
+        else:
+            await db.tokens.update_one(
+                {"username": request.username},
+                {"$set": token_doc},
+                upsert=True
+            )
         
+        logger.info(f"Login successful for {request.username}")
         return LoginResponse(
             success=True,
             message="Login successful",
@@ -273,7 +333,7 @@ async def login(request: LoginRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Login error: {str(e)}")
+        logger.error(f"Login error: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
@@ -336,6 +396,32 @@ async def root():
     return {"message": "TrueData Analytics API"}
 
 
+@api_router.get("/test-db")
+async def test_db():
+    """Test MongoDB connection"""
+    if not client or not db:
+        return {
+            "status": "error",
+            "message": "MongoDB client not initialized",
+            "mongo_url_set": bool(os.environ.get('MONGO_URL')),
+            "db_name_set": bool(os.environ.get('DB_NAME'))
+        }
+    
+    try:
+        await client.admin.command('ping')
+        return {
+            "status": "connected",
+            "database": os.environ.get('DB_NAME'),
+            "message": "MongoDB connection successful"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "error_type": type(e).__name__
+        }
+
+
 # Include the router in the main app
 app.include_router(api_router)
 
@@ -350,4 +436,5 @@ app.add_middleware(
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    client.close()
+    if client:
+        client.close()

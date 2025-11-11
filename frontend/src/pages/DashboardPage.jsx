@@ -18,7 +18,7 @@ import {
 import { useTheme } from "@/components/ThemeProvider";
 import OptionChainModal from "@/components/OptionChainModal";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || window.location.origin;
 const API = `${BACKEND_URL}/api`;
 
 const AUTO_REFRESH_INTERVAL = 30 * 60 * 1000; // 30 minutes in milliseconds

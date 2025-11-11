@@ -33,10 +33,37 @@ except ImportError as e:
             spec.loader.exec_module(server_module)
             app = server_module.app
         else:
-            raise ImportError(f"Could not load server.py: {e}")
+            # Create minimal app if import fails
+            from fastapi import FastAPI
+            app = FastAPI()
+            @app.get("/")
+            async def root():
+                return {
+                    "error": "Failed to import server",
+                    "message": str(e),
+                    "backend_path": str(backend_dir)
+                }
     else:
-        raise ImportError(f"server.py not found at {server_file}: {e}")
+        # Create minimal app if server.py not found
+        from fastapi import FastAPI
+        app = FastAPI()
+        @app.get("/")
+        async def root():
+            return {
+                "error": "server.py not found",
+                "backend_path": str(backend_dir),
+                "exists": server_file.exists()
+            }
 
 # Create Mangum handler for Vercel
 # Mangum converts ASGI (FastAPI) to AWS Lambda/Vercel format
-handler = Mangum(app, lifespan="off")
+try:
+    handler = Mangum(app, lifespan="off")
+except Exception as e:
+    # Fallback handler if Mangum fails
+    from fastapi import FastAPI
+    fallback_app = FastAPI()
+    @fallback_app.get("/")
+    async def root():
+        return {"error": "Mangum initialization failed", "message": str(e)}
+    handler = Mangum(fallback_app, lifespan="off")

@@ -10,7 +10,7 @@
       "includeFiles": "backend/**"
     }
   },
-  "cron": [
+  "crons": [
     {
       "path": "/api/health",
       "schedule": "*/15 * * * *"

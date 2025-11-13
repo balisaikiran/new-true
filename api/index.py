@@ -67,3 +67,7 @@ except Exception as e:
     async def root():
         return {"error": "Mangum initialization failed", "message": str(e)}
     handler = Mangum(fallback_app, lifespan="off")
+
+# Export handler for Vercel
+# Vercel will call this handler for all requests to /api/*
+__all__ = ["handler"]

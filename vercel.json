@@ -4,5 +4,16 @@
       "source": "/api/(.*)",
       "destination": "/api/index.py"
     }
+  ],
+  "functions": {
+    "api/index.py": {
+      "includeFiles": "backend/**"
+    }
+  },
+  "cron": [
+    {
+      "path": "/api/health",
+      "schedule": "*/15 * * * *"
+    }
   ]
 }

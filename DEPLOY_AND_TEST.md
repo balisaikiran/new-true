@@ -34,8 +34,8 @@ After deployment, go to your Vercel Dashboard:
 2. Add these variables:
 
 ```
-MONGO_URL=mongodb+srv://user:pass@cluster.mongodb.net/
-DB_NAME=truedata
+MONGO_URL=mongodb+srv://saiashok49_db_user:udHwPFcdabvxG3JS@cluster0.kykrymz.mongodb.net/
+DB_NAME=pothos
 CORS_ORIGINS=https://your-app.vercel.app,http://localhost:3000
 ```
 

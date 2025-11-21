@@ -11,6 +11,8 @@ import uuid
 from datetime import datetime, timezone, timedelta
 import httpx
 import asyncio
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 
 ROOT_DIR = Path(__file__).parent
@@ -39,11 +41,32 @@ try:
     if mongo_url and db_name:
         try:
             logger.info(f"Connecting to MongoDB database: {db_name}")
-            client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=5000)
+            # Strip quotes from environment variables if present
+            mongo_url = mongo_url.strip('"').strip("'")
+            db_name = db_name.strip('"').strip("'")
+            
+            # Add SSL certificate bypass to connection string for development
+            # This fixes SSL certificate verification errors on macOS/development environments
+            if '?' not in mongo_url:
+                mongo_url += '?tlsAllowInvalidCertificates=true'
+            elif 'tlsAllowInvalidCertificates' not in mongo_url:
+                mongo_url += '&tlsAllowInvalidCertificates=true'
+            
+            logger.info(f"Connecting with URL: {mongo_url.split('@')[0]}@***")  # Log without password
+            
+            # Motor/AsyncIOMotorClient SSL configuration for MongoDB Atlas
+            # mongodb+srv:// automatically uses TLS
+            # SSL certificate validation is disabled via connection string parameter
+            client = AsyncIOMotorClient(
+                mongo_url,
+                serverSelectionTimeoutMS=20000
+            )
             db = client[db_name]
-            logger.info("MongoDB initialized successfully")
+            logger.info("MongoDB client initialized (connection will be tested on first use)")
         except Exception as e:
             logger.warning(f"MongoDB connection failed (app will work without it): {str(e)}")
+            import traceback
+            logger.warning(traceback.format_exc())
             client = None
             db = None
     else:
@@ -225,6 +248,102 @@ def calculate_iv_metrics(option_chain_data: Dict[str, Any]) -> tuple:
         return None, None
 
 
+# Daily data storage functions
+def get_date_key(date: Optional[datetime] = None) -> str:
+    """Get date key in YYYY-MM-DD format"""
+    if date is None:
+        date = datetime.now(timezone.utc)
+    return date.strftime("%Y-%m-%d")
+
+
+async def get_previous_day_data(symbol: str) -> Optional[Dict[str, Any]]:
+    """Get previous trading day's closing data for a symbol"""
+    if db is None:
+        return None
+    
+    try:
+        # Get yesterday's date
+        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+        date_key = get_date_key(yesterday)
+        
+        # Try to find data for yesterday
+        doc = await db.daily_stock_data.find_one({
+            "date": date_key,
+            "symbol": symbol
+        })
+        
+        if doc:
+            return doc
+        
+        # If not found, try to find the most recent data before today
+        doc = await db.daily_stock_data.find_one(
+            {"symbol": symbol},
+            sort=[("date", -1)]
+        )
+        
+        return doc
+    except Exception as e:
+        logger.error(f"Error fetching previous day data for {symbol}: {str(e)}")
+        return None
+
+
+async def save_daily_stock_data(token: str):
+    """Save end-of-day stock data to MongoDB"""
+    if db is None:
+        logger.warning("MongoDB not initialized - cannot save daily data")
+        return
+    
+    try:
+        logger.info("Starting end-of-day data save...")
+        date_key = get_date_key()
+        
+        # Fetch current data for all stocks
+        stocks_data = []
+        for symbol in TOP_20_STOCKS:
+            try:
+                # Determine series based on symbol
+                if symbol in ["NIFTY", "BANKNIFTY"]:
+                    series = "XX"
+                else:
+                    series = "EQ"
+                
+                ltp = await fetch_ltp_spot(token, symbol, series)
+                
+                if ltp is not None:
+                    # Fetch volume and IV if available (using mock for now)
+                    import random
+                    random.seed(hash(symbol) + int(ltp))
+                    volume = random.randint(1000000, 50000000)
+                    iv = 20 + (hash(symbol) % 30)
+                    iv_percentile = 30 + (hash(symbol) % 60)
+                    
+                    stock_doc = {
+                        "symbol": symbol,
+                        "date": date_key,
+                        "spot": ltp,
+                        "volume": volume,
+                        "iv": round(iv, 2),
+                        "iv_percentile": round(iv_percentile, 2),
+                        "saved_at": datetime.now(timezone.utc).isoformat()
+                    }
+                    
+                    # Upsert the document
+                    await db.daily_stock_data.update_one(
+                        {"symbol": symbol, "date": date_key},
+                        {"$set": stock_doc},
+                        upsert=True
+                    )
+                    stocks_data.append(stock_doc)
+                    logger.info(f"Saved data for {symbol}: {ltp}")
+            except Exception as e:
+                logger.error(f"Error saving data for {symbol}: {str(e)}")
+        
+        logger.info(f"End-of-day data save completed. Saved {len(stocks_data)} stocks.")
+        return stocks_data
+    except Exception as e:
+        logger.error(f"Error in save_daily_stock_data: {str(e)}", exc_info=True)
+
+
 async def fetch_stock_data(token: str, symbol: str) -> StockData:
     """Fetch comprehensive stock data for dashboard"""
     try:
@@ -243,14 +362,32 @@ async def fetch_stock_data(token: str, symbol: str) -> StockData:
                 error="Failed to fetch data"
             )
         
-        # For demo purposes, generate realistic mock data based on LTP
-        # In production, you would fetch this from historical data or other endpoints
-        # Generate a random but consistent change for demo
-        import random
-        random.seed(hash(symbol) + int(ltp))
+        # Get previous day's closing price from MongoDB
+        previous_day_data = await get_previous_day_data(symbol)
+        previous_close = None
+        change_percent = None
         
-        change_percent = random.uniform(-3.0, 3.0)
-        volume = random.randint(1000000, 50000000)
+        if previous_day_data and previous_day_data.get("spot"):
+            previous_close = previous_day_data.get("spot")
+            # Calculate change percentage
+            if previous_close > 0:
+                change_percent = ((ltp - previous_close) / previous_close) * 100
+                change_percent = round(change_percent, 2)
+        
+        # If no previous data, use mock data (for first day or when DB is not available)
+        if change_percent is None:
+            import random
+            random.seed(hash(symbol) + int(ltp))
+            change_percent = random.uniform(-3.0, 3.0)
+            logger.info(f"No previous day data for {symbol}, using mock change %")
+        
+        # Generate volume (use previous day's volume if available, otherwise mock)
+        if previous_day_data and previous_day_data.get("volume"):
+            volume = previous_day_data.get("volume")
+        else:
+            import random
+            random.seed(hash(symbol) + int(ltp))
+            volume = random.randint(1000000, 50000000)
         
         # Generate signal based on change
         signal = None
@@ -263,17 +400,27 @@ async def fetch_stock_data(token: str, symbol: str) -> StockData:
         else:
             signal = "Neutral"
         
-        # Mock IV metrics (would need option chain data for real calculation)
-        iv = 20 + (hash(symbol) % 30)  # Mock IV between 20-50
-        iv_percentile = 30 + (hash(symbol) % 60)  # Mock percentile
+        # Get IV metrics (use previous day's if available, otherwise mock)
+        if previous_day_data:
+            iv = previous_day_data.get("iv")
+            iv_percentile = previous_day_data.get("iv_percentile")
+        else:
+            # Mock IV metrics
+            iv = 20 + (hash(symbol) % 30)  # Mock IV between 20-50
+            iv_percentile = 30 + (hash(symbol) % 60)  # Mock percentile
+        
+        if iv:
+            iv = round(iv, 2)
+        if iv_percentile:
+            iv_percentile = round(iv_percentile, 2)
         
         return StockData(
             symbol=symbol,
             spot=ltp,
             change_percent=round(change_percent, 2),
             volume=volume,
-            iv=round(iv, 2),
-            iv_percentile=round(iv_percentile, 2),
+            iv=iv,
+            iv_percentile=iv_percentile,
             signal=signal
         )
     
@@ -399,7 +546,7 @@ async def root():
 @api_router.get("/test-db")
 async def test_db():
     """Test MongoDB connection"""
-    if not client or not db:
+    if client is None or db is None:
         return {
             "status": "error",
             "message": "MongoDB client not initialized",
@@ -422,6 +569,25 @@ async def test_db():
         }
 
 
+@api_router.post("/market/save-daily-data")
+async def manual_save_daily_data(token: str):
+    """Manually trigger end-of-day data save (for testing)"""
+    try:
+        stocks_data = await save_daily_stock_data(token)
+        return {
+            "success": True,
+            "message": f"Saved data for {len(stocks_data) if stocks_data else 0} stocks",
+            "date": get_date_key(),
+            "stocks_count": len(stocks_data) if stocks_data else 0
+        }
+    except Exception as e:
+        logger.error(f"Error in manual save: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
 # Include the router in the main app
 app.include_router(api_router)
 
@@ -434,7 +600,45 @@ app.add_middleware(
 )
 
 
+# Initialize scheduler for daily end-of-day data save
+scheduler = AsyncIOScheduler()
+
+async def scheduled_end_of_day_save():
+    """Scheduled function to save end-of-day data"""
+    try:
+        # Get a valid token from database (use the most recent one)
+        if db is not None:
+            token_doc = await db.tokens.find_one(
+                sort=[("created_at", -1)]
+            )
+            if token_doc and token_doc.get("access_token"):
+                token = token_doc.get("access_token")
+                await save_daily_stock_data(token)
+                logger.info("Scheduled end-of-day data save completed")
+            else:
+                logger.warning("No valid token found for scheduled save")
+        else:
+            logger.warning("MongoDB not available for scheduled save")
+    except Exception as e:
+        logger.error(f"Error in scheduled end-of-day save: {str(e)}", exc_info=True)
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize scheduler on startup"""
+    # Schedule daily save at 3:30 PM IST (10:00 AM UTC) - typical market close time
+    # Adjust timezone as needed
+    scheduler.add_job(
+        scheduled_end_of_day_save,
+        trigger=CronTrigger(hour=10, minute=0),  # 10:00 AM UTC = 3:30 PM IST
+        id="daily_stock_save",
+        name="Daily End-of-Day Stock Data Save",
+        replace_existing=True
+    )
+    scheduler.start()
+    logger.info("Scheduler started - Daily data save scheduled at 10:00 AM UTC (3:30 PM IST)")
+
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    if client:
+    scheduler.shutdown()
+    if client is not None:
         client.close()

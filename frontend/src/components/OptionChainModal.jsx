@@ -70,62 +70,53 @@ const OptionChainModal = ({ stock, token, onClose }) => {
     }
   };
 
-  const getLotSize = (symbol) => {
-    // Common lot sizes
-    const lotSizes = {
-      'NIFTY': 50,
-      'BANKNIFTY': 15,
-    };
-    // Default lot size for stocks is 500
-    return lotSizes[symbol] || 500;
-  };
-
   const parseOptionChainData = (data) => {
     if (!data || !data.Records || !Array.isArray(data.Records)) {
       setParsedData([]);
       return;
     }
 
-    // Parse the option chain data based on TrueData API structure
-    // Structure: [symbol, expiry, call_timestamp, call_OI, call_LTP, call_bid, call_bid_qty, call_ask, call_ask_qty, call_vol, call_pOI, strike, put_bid, put_bid_qty, put_ask, put_ask_qty, put_OI, put_pOI, put_LTP, put_vol, put_timestamp]
+    // Parse the option chain data
+    // Based on actual data structure: [symbol, expiry, null, call_OI, call_LTP, zeros..., strike, zeros..., put_bid, put_ask, put_LTP, put_volume]
     const parsed = [];
     const strikeMap = new Map();
 
-    // Get symbol and lot size from first record
-    const symbol = data.Records[0] && data.Records[0][0] ? data.Records[0][0] : 'NIFTY';
-    const lotSize = getLotSize(symbol);
-
     data.Records.forEach((record) => {
-      if (!Array.isArray(record) || record.length < 21) return;
+      if (!Array.isArray(record) || record.length < 11) return;
 
-      // Index 11 is the strike price
+      // Index 11 is the strike price (1200, 1240, 1280, 1300, etc.)
       const strike = record[11];
       if (!strike || typeof strike !== 'number') return;
 
-      // Call option data (indices 3-10)
-      const callOIRaw = record[3] !== null && record[3] !== undefined ? record[3] : null;
+      // Call option data (before strike)
+      const callOI = record[3] !== null && record[3] !== undefined ? record[3] : null;
       const callLTP = record[4] !== null && record[4] !== undefined ? record[4] : null;
-      const callBid = record[5] !== null && record[5] !== undefined && record[5] > 0 ? record[5] : null;
-      const callBidQty = record[6] !== null && record[6] !== undefined ? record[6] : null;
-      const callAsk = record[7] !== null && record[7] !== undefined && record[7] > 0 ? record[7] : null;
-      const callAskQty = record[8] !== null && record[8] !== undefined ? record[8] : null;
-      const callVolRaw = record[9] !== null && record[9] !== undefined ? record[9] : null;
       
-      // Put option data (indices 12-19)
-      const putBid = record[12] !== null && record[12] !== undefined && record[12] > 0 ? record[12] : null;
-      const putBidQty = record[13] !== null && record[13] !== undefined ? record[13] : null;
-      const putAsk = record[14] !== null && record[14] !== undefined && record[14] > 0 ? record[14] : null;
-      const putAskQty = record[15] !== null && record[15] !== undefined ? record[15] : null;
-      const putOIRaw = record[16] !== null && record[16] !== undefined ? record[16] : null;
+      // Try to find call bid/ask (usually zeros in this API, but check indices 5-10)
+      let callBid = null, callAsk = null, callVolume = null;
+      for (let i = 5; i < 11; i++) {
+        if (record[i] && typeof record[i] === 'number' && record[i] > 0) {
+          if (!callBid) callBid = record[i];
+          else if (!callAsk) callAsk = record[i];
+          else if (!callVolume && record[i] > 1000) callVolume = record[i];
+        }
+      }
+
+      // Put option data (after strike)
+      // Based on sample: indices 16-17 are large numbers (bid/ask), 18 is small decimal (LTP), 19 is large number (volume)
+      const putBid = record[16] !== null && record[16] !== undefined && record[16] > 0 ? record[16] : null;
+      const putAsk = record[17] !== null && record[17] !== undefined && record[17] > 0 ? record[17] : null;
       const putLTP = record[18] !== null && record[18] !== undefined && record[18] > 0 ? record[18] : null;
-      const putVolRaw = record[19] !== null && record[19] !== undefined ? record[19] : null;
+      const putVolume = record[19] !== null && record[19] !== undefined && record[19] > 0 ? record[19] : null;
       
-      // Convert OI and Volume from lot-size-multiplied to NSE-equivalent
-      // TrueData provides: OI * lot_size, so divide by lot_size to get NSE value
-      const callOI = callOIRaw !== null && lotSize > 0 ? callOIRaw / lotSize : null;
-      const callVolume = callVolRaw !== null && lotSize > 0 ? callVolRaw / lotSize : null;
-      const putOI = putOIRaw !== null && lotSize > 0 ? putOIRaw / lotSize : null;
-      const putVolume = putVolRaw !== null && lotSize > 0 ? putVolRaw / lotSize : null;
+      // Try to find put OI (might be in other indices)
+      let putOI = null;
+      for (let i = 12; i < 16; i++) {
+        if (record[i] && typeof record[i] === 'number' && record[i] > 0 && record[i] < 1000000) {
+          putOI = record[i];
+          break;
+        }
+      }
 
       // Store in map (handle duplicates by merging)
       if (strikeMap.has(strike)) {
@@ -135,16 +126,12 @@ const OptionChainModal = ({ stock, token, onClose }) => {
           callOI: callOI !== null ? callOI : existing.callOI,
           callLTP: callLTP !== null ? callLTP : existing.callLTP,
           callBid: callBid !== null ? callBid : existing.callBid,
-          callBidQty: callBidQty !== null ? callBidQty : existing.callBidQty,
           callAsk: callAsk !== null ? callAsk : existing.callAsk,
-          callAskQty: callAskQty !== null ? callAskQty : existing.callAskQty,
           callVolume: callVolume !== null ? callVolume : existing.callVolume,
           putOI: putOI !== null ? putOI : existing.putOI,
           putLTP: putLTP !== null ? putLTP : existing.putLTP,
           putBid: putBid !== null ? putBid : existing.putBid,
-          putBidQty: putBidQty !== null ? putBidQty : existing.putBidQty,
           putAsk: putAsk !== null ? putAsk : existing.putAsk,
-          putAskQty: putAskQty !== null ? putAskQty : existing.putAskQty,
           putVolume: putVolume !== null ? putVolume : existing.putVolume,
         });
       } else {
@@ -153,16 +140,12 @@ const OptionChainModal = ({ stock, token, onClose }) => {
           callOI,
           callLTP,
           callBid,
-          callBidQty,
           callAsk,
-          callAskQty,
           callVolume,
           putOI,
           putLTP,
           putBid,
-          putBidQty,
           putAsk,
-          putAskQty,
           putVolume,
         });
       }

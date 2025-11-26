@@ -1025,36 +1025,43 @@ async def fetch_stock_data(token: str, symbol: str) -> StockData:
         else:
             signal = "Neutral"
         
-        # Get IV metrics - fetch real IV from option chain
+        # Get IV metrics - OPTIMIZED: Use cached data first to avoid API calls
         iv = None
         iv_percentile = None
         
-        # Try to fetch current IV from option chain - try multiple expiry dates
-        expiry = await get_available_expiry(token, symbol)
-        option_chain_data = await fetch_option_chain(token, symbol, expiry)
-        
-        if option_chain_data:
-            records = option_chain_data.get('Records', [])
-            if records and len(records) > 0:
-                # Extract real IV from option chain
-                iv = extract_iv_from_option_chain(option_chain_data, ltp)
-                if iv:
-                    logger.info(f"Extracted current IV for {symbol}: {iv}% (from expiry {expiry})")
-                    # Calculate IV percentile using historical data
-                    iv_percentile = await calculate_iv_percentile(symbol, iv)
-                else:
-                    logger.warning(f"Could not extract IV from option chain for {symbol} (expiry {expiry})")
-            else:
-                logger.warning(f"Option chain for {symbol} has no records (expiry {expiry})")
-        
-        # Fallback: Use previous day's IV if current extraction failed
-        if iv is None and previous_day_data:
+        # PRIORITY 1: Use previous day's IV (fast, no API call needed)
+        if previous_day_data:
             iv = previous_day_data.get("iv")
             iv_percentile = previous_day_data.get("iv_percentile")
             if iv:
-                logger.info(f"Using previous day IV for {symbol}: {iv}%")
+                logger.info(f"Using cached IV for {symbol}: {iv}% (from previous day)")
         
-        # Final fallback: Use mock IV only if no data available (for first-time setup)
+        # PRIORITY 2: Only fetch option chain if no cached IV available
+        # This dramatically reduces API calls on initial load
+        if iv is None:
+            try:
+                # Only fetch option chain if we don't have cached IV
+                expiry = await get_available_expiry(token, symbol)
+                option_chain_data = await fetch_option_chain(token, symbol, expiry)
+                
+                if option_chain_data:
+                    records = option_chain_data.get('Records', [])
+                    if records and len(records) > 0:
+                        # Extract real IV from option chain
+                        iv_from_chain = extract_iv_from_option_chain(option_chain_data, ltp)
+                        if iv_from_chain:
+                            iv = iv_from_chain
+                            logger.info(f"Extracted current IV for {symbol}: {iv}% (from expiry {expiry})")
+                            iv_percentile = await calculate_iv_percentile(symbol, iv)
+                        else:
+                            logger.warning(f"Could not extract IV from option chain for {symbol} (expiry {expiry})")
+                    else:
+                        logger.warning(f"Option chain for {symbol} has no records (expiry {expiry})")
+            except Exception as e:
+                logger.warning(f"Error fetching option chain for {symbol}: {str(e)}")
+                # Continue with fallback IV
+        
+        # PRIORITY 3: Final fallback - Use mock IV only if no data available (for first-time setup)
         if iv is None:
             logger.warning(f"Could not extract IV for {symbol}, using fallback calculation")
             import random

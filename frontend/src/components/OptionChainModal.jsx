@@ -199,7 +199,7 @@ const OptionChainModal = ({ stock, token, onClose }) => {
                     id="expiry"
                     data-testid="expiry-input"
                     type="text"
-                    placeholder="25-11-2025"
+                    placeholder="30-12-2025"
                     value={expiry}
                     onChange={(e) => setExpiry(e.target.value)}
                     className="pl-10"

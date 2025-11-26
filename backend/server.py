@@ -880,9 +880,9 @@ async def save_daily_stock_data(token: str):
                     # Fallback to mock IV if extraction failed (for first-time setup or API issues)
                     if iv is None:
                         logger.warning(f"Could not extract IV for {symbol}, using fallback calculation")
-                        import random
-                        random.seed(hash(symbol) + int(ltp))
-                        iv = 20 + (hash(symbol) % 30)
+                    import random
+                    random.seed(hash(symbol) + int(ltp))
+                    iv = 20 + (hash(symbol) % 30)
                     
                     # Calculate IV percentile using historical data
                     iv_percentile = await calculate_iv_percentile(symbol, iv)
@@ -1301,7 +1301,21 @@ app.add_middleware(
 
 
 # Initialize scheduler for daily end-of-day data save
-scheduler = AsyncIOScheduler()
+# Note: Scheduler is disabled in serverless environments (Vercel) as they don't support long-running processes
+# Use Vercel Cron Jobs or external scheduler for production
+scheduler = None
+
+# Only initialize scheduler if not in serverless environment
+if not os.environ.get('VERCEL') and not os.environ.get('VERCEL_ENV'):
+    try:
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        scheduler = AsyncIOScheduler()
+        logger.info("Scheduler initialized (local environment)")
+    except Exception as e:
+        logger.warning(f"Could not initialize scheduler: {str(e)}")
+        scheduler = None
+else:
+    logger.info("Scheduler disabled (serverless/Vercel environment detected)")
 
 async def scheduled_end_of_day_save():
     """Scheduled function to save end-of-day data (stocks + option chains)"""
@@ -1332,21 +1346,32 @@ async def scheduled_end_of_day_save():
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize scheduler on startup"""
-    # Schedule daily save at 3:30 PM IST (10:00 AM UTC) - typical market close time
-    # Adjust timezone as needed
-    scheduler.add_job(
-        scheduled_end_of_day_save,
-        trigger=CronTrigger(hour=10, minute=0),  # 10:00 AM UTC = 3:30 PM IST
-        id="daily_stock_save",
-        name="Daily End-of-Day Stock Data Save",
-        replace_existing=True
-    )
-    scheduler.start()
-    logger.info("Scheduler started - Daily data save scheduled at 10:00 AM UTC (3:30 PM IST)")
+    """Initialize scheduler on startup (only if not in serverless environment)"""
+    if scheduler is not None:
+        try:
+            # Schedule daily save at 3:30 PM IST (10:00 AM UTC) - typical market close time
+            # Adjust timezone as needed
+            from apscheduler.triggers.cron import CronTrigger
+            scheduler.add_job(
+                scheduled_end_of_day_save,
+                trigger=CronTrigger(hour=10, minute=0),  # 10:00 AM UTC = 3:30 PM IST
+                id="daily_stock_save",
+                name="Daily End-of-Day Stock Data Save",
+                replace_existing=True
+            )
+            scheduler.start()
+            logger.info("Scheduler started - Daily data save scheduled at 10:00 AM UTC (3:30 PM IST)")
+        except Exception as e:
+            logger.warning(f"Could not start scheduler: {str(e)}")
+    else:
+        logger.info("Scheduler disabled (serverless environment detected) - Use Vercel Cron Jobs for scheduled tasks")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
-    scheduler.shutdown()
+    if scheduler is not None:
+        try:
+            scheduler.shutdown()
+        except Exception as e:
+            logger.warning(f"Error shutting down scheduler: {str(e)}")
     if client is not None:
         client.close()

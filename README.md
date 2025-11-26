@@ -105,11 +105,10 @@ pip install -r requirements.txt
 Create a `.env` file in the `backend/` directory:
 
 ```env
-MONGO_URL=mongodb+srv://your-username:your-password@cluster.mongodb.net/
+REACT_APP_BACKEND_URL=https://pothos-backend.onrender.com
+MONGO_URL=mongodb+srv://saiashok49_db_user:udHwPFcdabvxG3JS@cluster0.kykrymz.mongodb.net/
 DB_NAME=pothos
-CORS_ORIGINS=http://localhost:3000,http://localhost:5173
-```
-
+CORS_ORIGINS="*"
 **Note**: MongoDB is optional - the app works without it!
 
 ### Step 6: Run Backend Server

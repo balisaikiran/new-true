@@ -68,5 +68,8 @@ typing_extensions==4.15.0
 tzdata==2025.2
 urllib3==2.5.0
 uvicorn==0.25.0
+mangum==0.17.0
+apscheduler==3.10.4
+python-jose==3.5.0
 watchfiles==1.1.1
 apscheduler==3.10.4

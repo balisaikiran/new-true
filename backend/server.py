@@ -17,6 +17,7 @@ from apscheduler.triggers.cron import CronTrigger
 import math
 
 
+
 ROOT_DIR = Path(__file__).parent
 # Try to load .env file if it exists (for local development)
 env_file = ROOT_DIR / '.env'

@@ -1,4 +1,6 @@
-from fastapi import FastAPI, APIRouter, HTTPException, status
+from fastapi import FastAPI, APIRouter, HTTPException, status, Query
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -15,6 +17,8 @@ import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 import math
+import pandas as pd
+from io import StringIO
 
 
 
@@ -880,9 +884,9 @@ async def save_daily_stock_data(token: str):
                     # Fallback to mock IV if extraction failed (for first-time setup or API issues)
                     if iv is None:
                         logger.warning(f"Could not extract IV for {symbol}, using fallback calculation")
-                        import random
-                        random.seed(hash(symbol) + int(ltp))
-                        iv = 20 + (hash(symbol) % 30)
+                    import random
+                    random.seed(hash(symbol) + int(ltp))
+                    iv = 20 + (hash(symbol) % 30)
                     
                     # Calculate IV percentile using historical data
                     iv_percentile = await calculate_iv_percentile(symbol, iv)
@@ -1229,6 +1233,117 @@ async def test_db():
         }
 
 
+@api_router.get("/market/verify-iv/{symbol}")
+async def verify_iv(symbol: str, token: str):
+    """
+    Verify IV calculation for a specific symbol.
+    Shows detailed information about IV calculation including:
+    - Spot price
+    - Option chain data used
+    - Calculated IV
+    - Cached IV (if available)
+    - Comparison and details
+    """
+    try:
+        # Determine series
+        if symbol in ["NIFTY", "BANKNIFTY"]:
+            series = "XX"
+        else:
+            series = "EQ"
+        
+        # Fetch spot price
+        ltp = await fetch_ltp_spot(token, symbol, series)
+        if ltp is None:
+            return {
+                "success": False,
+                "symbol": symbol,
+                "error": "Failed to fetch spot price"
+            }
+        
+        # Get cached IV from previous day
+        previous_day_data = await get_previous_day_data(symbol)
+        cached_iv = None
+        cached_iv_percentile = None
+        if previous_day_data:
+            cached_iv = previous_day_data.get("iv")
+            cached_iv_percentile = previous_day_data.get("iv_percentile")
+        
+        # Fetch option chain and calculate IV
+        expiry = await get_available_expiry(token, symbol)
+        option_chain_data = await fetch_option_chain(token, symbol, expiry)
+        
+        calculated_iv = None
+        calculated_iv_percentile = None
+        calculation_details = {}
+        
+        if option_chain_data:
+            records = option_chain_data.get('Records', [])
+            if records and len(records) > 0:
+                # Extract IV
+                calculated_iv = extract_iv_from_option_chain(option_chain_data, ltp)
+                
+                if calculated_iv:
+                    calculated_iv_percentile = await calculate_iv_percentile(symbol, calculated_iv)
+                    
+                    # Get calculation details
+                    calculation_details = {
+                        "expiry_used": expiry,
+                        "spot_price": ltp,
+                        "records_count": len(records),
+                        "calculation_method": "Black-Scholes from ATM options"
+                    }
+                    
+                    # Try to get sample option data for verification
+                    if records:
+                        sample_record = records[0]
+                        if len(sample_record) > 10:
+                            calculation_details["sample_option"] = {
+                                "strike": sample_record[2] if len(sample_record) > 2 else None,
+                                "call_price": sample_record[5] if len(sample_record) > 5 else None,
+                                "put_price": sample_record[6] if len(sample_record) > 6 else None,
+                            }
+        
+        # Compare cached vs calculated
+        comparison = None
+        if cached_iv and calculated_iv:
+            diff = abs(calculated_iv - cached_iv)
+            diff_percent = (diff / cached_iv) * 100 if cached_iv > 0 else 0
+            comparison = {
+                "difference": round(diff, 2),
+                "difference_percent": round(diff_percent, 2),
+                "match": diff_percent < 5.0  # Consider match if within 5%
+            }
+        
+        return {
+            "success": True,
+            "symbol": symbol,
+            "spot_price": ltp,
+            "expiry_used": expiry,
+            "cached_iv": {
+                "iv": round(cached_iv, 2) if cached_iv else None,
+                "iv_percentile": round(cached_iv_percentile, 2) if cached_iv_percentile else None,
+                "source": "Previous day's data from MongoDB"
+            },
+            "calculated_iv": {
+                "iv": round(calculated_iv, 2) if calculated_iv else None,
+                "iv_percentile": round(calculated_iv_percentile, 2) if calculated_iv_percentile else None,
+                "source": "Real-time calculation from option chain"
+            },
+            "comparison": comparison,
+            "calculation_details": calculation_details,
+            "option_chain_available": option_chain_data is not None,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    
+    except Exception as e:
+        logger.error(f"IV verification error for {symbol}: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "symbol": symbol,
+            "error": str(e)
+        }
+
+
 @api_router.post("/market/save-daily-data")
 async def manual_save_daily_data(token: str):
     """Manually trigger end-of-day data save (for testing)"""
@@ -1295,8 +1410,50 @@ async def manual_save_all_daily_data(token: str):
         )
 
 
-# Include the router in the main app
-app.include_router(api_router)
+# Note: Router will be included after all routes are defined (see end of file)
+
+# Serve static files for GraphQL viewer
+static_dir = ROOT_DIR / "static"
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+# GraphQL viewer page
+@app.get("/graphql-viewer")
+async def graphql_viewer():
+    """Serve GraphQL viewer HTML page"""
+    viewer_file = ROOT_DIR / "static" / "graphql_viewer.html"
+    if viewer_file.exists():
+        return FileResponse(viewer_file)
+    else:
+        return {"message": "GraphQL viewer not found. Please ensure static/graphql_viewer.html exists."}
+
+@app.get("/viewer")
+async def simple_viewer():
+    """Serve simple NIFTY data viewer HTML page"""
+    viewer_file = ROOT_DIR / "simple_viewer.html"
+    if viewer_file.exists():
+        return FileResponse(viewer_file)
+    else:
+        return {"message": "Simple viewer not found."}
+
+# Add GraphQL endpoint
+try:
+    from strawberry.fastapi import GraphQLRouter
+    try:
+        from graphql_schema import schema
+    except ImportError:
+        from backend.graphql_schema import schema
+    
+    # Enable GraphiQL for interactive UI with table view
+    graphql_app = GraphQLRouter(schema, graphiql=True)
+    app.include_router(graphql_app, prefix="/graphql")
+    logger.info("GraphQL endpoint available at /graphql (GraphiQL enabled)")
+except ImportError as e:
+    logger.warning(f"Strawberry GraphQL not installed. GraphQL endpoint not available. Error: {str(e)}")
+except Exception as e:
+    logger.warning(f"Could not initialize GraphQL endpoint: {str(e)}")
+    import traceback
+    logger.warning(traceback.format_exc())
 
 app.add_middleware(
     CORSMiddleware,
@@ -1309,6 +1466,590 @@ app.add_middleware(
 
 # Initialize scheduler for daily end-of-day data save
 scheduler = AsyncIOScheduler()
+
+async def get_previous_nifty_data(index_name: str = "NIFTY 50") -> Optional[Dict[str, Any]]:
+    """Get previous trading day's NIFTY data from nifty_data collection"""
+    if db is None:
+        return None
+    
+    try:
+        # Get yesterday's date
+        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+        date_key = get_date_key(yesterday)
+        
+        # Try to find data for yesterday
+        collection = db.nifty_data
+        doc = await collection.find_one({
+            "name": index_name,
+            "date": date_key
+        })
+        
+        if doc:
+            return doc
+        
+        # If not found, try to find the most recent data before today for this index
+        doc = await collection.find_one(
+            {"name": index_name},
+            sort=[("date", -1)]
+        )
+        
+        return doc
+    except Exception as e:
+        logger.error(f"Error fetching previous {index_name} data: {str(e)}")
+        return None
+
+
+async def fetch_historical_ohlc(token: str, symbol: str, date: str) -> Optional[Dict[str, Any]]:
+    """Fetch historical OHLC data from TrueData API for a specific date"""
+    try:
+        # Try TrueData historical data endpoint
+        # Common formats: /gethistoricaldata, /historical, /gethistoricdata
+        
+        endpoints_to_try = [
+            f"{TRUEDATA_ANALYTICS_URL}/gethistoricaldata",
+            f"{TRUEDATA_ANALYTICS_URL}/historical",
+            f"{TRUEDATA_ANALYTICS_URL}/gethistoricdata",
+            f"{TRUEDATA_ANALYTICS_URL}/getHistoricalData",
+        ]
+        
+        for endpoint in endpoints_to_try:
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    # Try different parameter formats
+                    params_variants = [
+                        {
+                            "symbol": symbol,
+                            "series": "XX" if symbol in ["NIFTY", "BANKNIFTY"] else "EQ",
+                            "from": date,
+                            "to": date,
+                            "timeframe": "daily",
+                            "response": "json"
+                        },
+                        {
+                            "symbol": symbol,
+                            "fromdate": date,
+                            "todate": date,
+                            "interval": "1D",
+                            "response": "json"
+                        },
+                        {
+                            "instrument": f"NSE:{symbol}",
+                            "from": date,
+                            "to": date,
+                            "timeframe": "daily",
+                            "response": "json"
+                        },
+                        {
+                            "symbol": symbol,
+                            "from": date,
+                            "to": date,
+                            "response": "json"
+                        }
+                    ]
+                    
+                    for params in params_variants:
+                        try:
+                            response = await client.get(
+                                endpoint,
+                                params=params,
+                                headers={"Authorization": f"Bearer {token}"}
+                            )
+                            
+                            if response.status_code == 200:
+                                data = response.json()
+                                logger.info(f"Successfully fetched historical data from {endpoint}")
+                                
+                                # Parse the response to extract OHLC
+                                # Response format may vary, try common structures
+                                ohlc_data = None
+                                
+                                if isinstance(data, dict):
+                                    # Try nested data structure
+                                    if "data" in data and isinstance(data["data"], list) and len(data["data"]) > 0:
+                                        day_data = data["data"][0]
+                                        if isinstance(day_data, dict):
+                                            ohlc_data = {
+                                                "open": day_data.get("open") or day_data.get("Open") or day_data.get("o"),
+                                                "high": day_data.get("high") or day_data.get("High") or day_data.get("h"),
+                                                "low": day_data.get("low") or day_data.get("Low") or day_data.get("l"),
+                                                "close": day_data.get("close") or day_data.get("Close") or day_data.get("c"),
+                                            }
+                                    # Try direct OHLC fields
+                                    elif "open" in data or "Open" in data:
+                                        ohlc_data = {
+                                            "open": data.get("open") or data.get("Open"),
+                                            "high": data.get("high") or data.get("High"),
+                                            "low": data.get("low") or data.get("Low"),
+                                            "close": data.get("close") or data.get("Close"),
+                                        }
+                                    # Try Records array (similar to option chain)
+                                    elif "Records" in data and isinstance(data["Records"], list) and len(data["Records"]) > 0:
+                                        record = data["Records"][0]
+                                        if isinstance(record, list) and len(record) >= 4:
+                                            # Common format: [date, open, high, low, close, ...]
+                                            ohlc_data = {
+                                                "open": record[1] if len(record) > 1 else None,
+                                                "high": record[2] if len(record) > 2 else None,
+                                                "low": record[3] if len(record) > 3 else None,
+                                                "close": record[4] if len(record) > 4 else None,
+                                            }
+                                elif isinstance(data, list) and len(data) > 0:
+                                    day_data = data[0]
+                                    if isinstance(day_data, dict):
+                                        ohlc_data = {
+                                            "open": day_data.get("open") or day_data.get("Open") or day_data.get("o"),
+                                            "high": day_data.get("high") or day_data.get("High") or day_data.get("h"),
+                                            "low": day_data.get("low") or day_data.get("Low") or day_data.get("l"),
+                                            "close": day_data.get("close") or day_data.get("Close") or day_data.get("c"),
+                                        }
+                                    elif isinstance(day_data, list) and len(day_data) >= 4:
+                                        ohlc_data = {
+                                            "open": day_data[1] if len(day_data) > 1 else None,
+                                            "high": day_data[2] if len(day_data) > 2 else None,
+                                            "low": day_data[3] if len(day_data) > 3 else None,
+                                            "close": day_data[4] if len(day_data) > 4 else None,
+                                        }
+                                
+                                if ohlc_data and all([ohlc_data.get("open"), ohlc_data.get("high"), 
+                                                     ohlc_data.get("low"), ohlc_data.get("close")]):
+                                    return ohlc_data
+                        except Exception as e:
+                            logger.debug(f"Tried endpoint {endpoint} with params {params}: {str(e)}")
+                            continue
+            except Exception as e:
+                logger.debug(f"Error trying endpoint {endpoint}: {str(e)}")
+                continue
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching historical OHLC: {str(e)}")
+        return None
+
+
+async def fetch_nifty_ohlc_from_yfinance(index_name: str = "NIFTY 50") -> Optional[Dict[str, Any]]:
+    """Fetch NIFTY OHLC data using yfinance (Yahoo Finance)"""
+    try:
+        import yfinance as yf
+        
+        # Get today's date
+        today = datetime.now(timezone.utc)
+        date_str = today.strftime("%Y-%m-%d")
+        
+        logger.info(f"Fetching {index_name} OHLC data for {date_str} from yfinance...")
+        
+        # Map index names to yfinance symbols
+        symbol_map = {
+            "NIFTY 50": ['NIFTY.NS', '^NSEI', 'NSEI'],
+            "NIFTY BANK": ['BANKNIFTY.NS', '^NSEBANK', 'NSEBANK']
+        }
+        
+        symbols_to_try = symbol_map.get(index_name, ['NIFTY.NS', '^NSEI', 'NSEI'])
+        
+        loop = asyncio.get_event_loop()
+        
+        for symbol in symbols_to_try:
+            try:
+                ticker = yf.Ticker(symbol)
+                # Get last 5 days of data
+                end_date = today
+                start_date = today - timedelta(days=5)
+                
+                hist = await loop.run_in_executor(
+                    None,
+                    lambda: ticker.history(start=start_date, end=end_date, interval='1d')
+                )
+                
+                if hist is not None and len(hist) > 0:
+                    # Get the most recent data
+                    last_row = hist.iloc[-1]
+                    
+                    # Extract OHLC
+                    open_price = float(last_row['Open'])
+                    high_price = float(last_row['High'])
+                    low_price = float(last_row['Low'])
+                    close_price = float(last_row['Close'])
+                    
+                    # Get the date from index
+                    data_date = last_row.name
+                    if isinstance(data_date, pd.Timestamp):
+                        date_str = data_date.strftime("%Y-%m-%d")
+                    
+                    logger.info(f"✅ Successfully fetched {index_name} OHLC from yfinance ({symbol}): O={open_price}, H={high_price}, L={low_price}, C={close_price}")
+                    
+                    return {
+                        "name": index_name,
+                        "date": date_str,
+                        "open": round(open_price, 2),
+                        "high": round(high_price, 2),
+                        "low": round(low_price, 2),
+                        "close": round(close_price, 2),
+                        "source": f"Yahoo Finance ({symbol})",
+                        "imported_at": datetime.now(timezone.utc).isoformat()
+                    }
+            except Exception as e:
+                logger.debug(f"yfinance symbol {symbol} failed: {str(e)}")
+                continue
+        
+        return None
+    except ImportError:
+        logger.error("yfinance library not installed")
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching {index_name} OHLC from yfinance: {str(e)}")
+        return None
+
+
+async def fetch_nifty_ohlc_from_nse_api(index_name: str = "NIFTY 50") -> Optional[Dict[str, Any]]:
+    """Fetch NIFTY OHLC data from NSE official API for a specific index"""
+    try:
+        today = datetime.now(timezone.utc)
+        date_str = today.strftime("%Y-%m-%d")
+        
+        logger.info(f"Fetching {index_name} OHLC data for {date_str} from NSE API...")
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.nseindia.com/',
+        }
+        
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            # First request to get cookies
+            await client.get('https://www.nseindia.com/', headers=headers)
+            
+            # Get index data
+            response = await client.get(
+                'https://www.nseindia.com/api/equity-stockIndices',
+                headers=headers,
+                params={'index': index_name}
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Parse response - NSE API structure
+                if isinstance(data, dict) and 'data' in data:
+                    for item in data['data']:
+                        symbol = str(item.get('symbol', '')).upper()
+                        index_upper = index_name.upper()
+                        if index_upper in symbol or symbol == index_upper:
+                            # NSE API fields: open, dayHigh, dayLow, lastPrice
+                            open_price = item.get('open')
+                            high_price = item.get('dayHigh')
+                            low_price = item.get('dayLow')
+                            close_price = item.get('lastPrice')  # Current price (for intraday) or use previousClose for EOD
+                            
+                            # For end-of-day, use previousClose as close if available
+                            if item.get('previousClose'):
+                                close_price = item.get('previousClose')
+                            
+                            # Validate all prices are present and valid
+                            if all([open_price is not None, high_price is not None, 
+                                   low_price is not None, close_price is not None]):
+                                try:
+                                    open_price = float(open_price)
+                                    high_price = float(high_price)
+                                    low_price = float(low_price)
+                                    close_price = float(close_price)
+                                    
+                                    logger.info(f"✅ Successfully fetched {index_name} OHLC from NSE API: O={open_price}, H={high_price}, L={low_price}, C={close_price}")
+                                    return {
+                                        "name": index_name,
+                                        "date": date_str,
+                                        "open": round(open_price, 2),
+                                        "high": round(high_price, 2),
+                                        "low": round(low_price, 2),
+                                        "close": round(close_price, 2),
+                                        "source": "NSE Official API",
+                                        "imported_at": datetime.now(timezone.utc).isoformat()
+                                    }
+                                except (ValueError, TypeError) as e:
+                                    logger.warning(f"Error converting OHLC values to float: {e}")
+                                    continue
+            
+            return None
+    except Exception as e:
+        logger.error(f"Error fetching {index_name} OHLC from NSE API: {str(e)}")
+        return None
+
+
+async def fetch_nifty_ohlc_from_nse(index_name: str = "NIFTY 50", token: str = None) -> Optional[Dict[str, Any]]:
+    """Fetch NIFTY OHLC data from NSE using NSEDownload library"""
+    try:
+        # Import NSEDownload (synchronous library, so we'll run it in executor)
+        from NSEDownload import indices
+        
+        # Get today's date
+        today = datetime.now(timezone.utc)
+        date_str = today.strftime("%Y-%m-%d")
+        date_str_dd_mm_yyyy = today.strftime("%d-%m-%Y")
+        
+        logger.info(f"Fetching {index_name} OHLC data for {date_str} from NSE using NSEDownload...")
+        
+        # Run NSEDownload in executor thread (it's synchronous)
+        loop = asyncio.get_event_loop()
+        df = await loop.run_in_executor(
+            None,
+            lambda: indices.get_data(
+                index_name=index_name,
+                start_date=date_str_dd_mm_yyyy,
+                end_date=date_str_dd_mm_yyyy
+            )
+        )
+        
+        if df is None or len(df) == 0:
+            logger.warning(f"No data found for {date_str}, trying previous day...")
+            # Try previous day if today's data not available yet
+            yesterday = today - timedelta(days=1)
+            date_str_prev = yesterday.strftime("%d-%m-%Y")
+            df = await loop.run_in_executor(
+                None,
+                lambda: indices.get_data(
+                    index_name=index_name,
+                    start_date=date_str_prev,
+                    end_date=date_str_prev
+                )
+            )
+            if df is not None and len(df) > 0:
+                date_str = yesterday.strftime("%Y-%m-%d")
+        
+        # If still no data, try a wider date range (last 5 days)
+        if df is None or len(df) == 0:
+            logger.warning(f"No data found for single day, trying wider range...")
+            start_date = today - timedelta(days=5)
+            df = await loop.run_in_executor(
+                None,
+                lambda: indices.get_data(
+                    index_name='NIFTY 50',
+                    start_date=start_date.strftime("%d-%m-%Y"),
+                    end_date=date_str_dd_mm_yyyy
+                )
+            )
+        
+        if df is None or len(df) == 0:
+            logger.error(f"No {index_name} data found from NSEDownload")
+            return None
+        
+        # Get the last row (most recent data)
+        last_row = df.iloc[-1]
+        
+        # Extract OHLC data (column names may vary)
+        open_price = None
+        high_price = None
+        low_price = None
+        close_price = None
+        
+        # Try different possible column names
+        for col in df.columns:
+            col_lower = str(col).lower()
+            if 'open' in col_lower and open_price is None:
+                open_price = last_row[col]
+            elif 'high' in col_lower and high_price is None:
+                high_price = last_row[col]
+            elif 'low' in col_lower and low_price is None:
+                low_price = last_row[col]
+            elif 'close' in col_lower and close_price is None:
+                close_price = last_row[col]
+        
+        # If column names don't match, try positional (common format: Date, Open, High, Low, Close, Volume)
+        if open_price is None and len(df.columns) >= 5:
+            open_price = last_row.iloc[1] if pd.notna(last_row.iloc[1]) else None
+            high_price = last_row.iloc[2] if pd.notna(last_row.iloc[2]) else None
+            low_price = last_row.iloc[3] if pd.notna(last_row.iloc[3]) else None
+            close_price = last_row.iloc[4] if pd.notna(last_row.iloc[4]) else None
+        
+        if not all([open_price is not None, high_price is not None, low_price is not None, close_price is not None]):
+            logger.error(f"Could not extract complete OHLC data. Columns: {list(df.columns)}, Last row: {last_row.to_dict()}")
+            return None
+        
+        logger.info(f"✅ Successfully fetched {index_name} OHLC from NSE: O={open_price}, H={high_price}, L={low_price}, C={close_price}")
+        
+        return {
+            "name": index_name,
+            "date": date_str,
+            "open": round(float(open_price), 2),
+            "high": round(float(high_price), 2),
+            "low": round(float(low_price), 2),
+            "close": round(float(close_price), 2),
+            "source": "NSE (NSEDownload)",
+            "imported_at": datetime.now(timezone.utc).isoformat()
+        }
+    except ImportError:
+        logger.error("NSEDownload library not installed. Please install it: pip install NSEDownload")
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching NIFTY OHLC from NSE: {str(e)}", exc_info=True)
+        return None
+
+
+async def fetch_nifty_ohlc_from_truedata(index_name: str = "NIFTY 50", token: str = None) -> Optional[Dict[str, Any]]:
+    """Fetch NIFTY OHLC data - tries multiple sources in order of reliability"""
+    try:
+        # Priority 1: Try NSE Official API (most reliable)
+        logger.info(f"Attempting to fetch {index_name} OHLC from NSE Official API...")
+        nse_api_data = await fetch_nifty_ohlc_from_nse_api(index_name)
+        if nse_api_data:
+            return nse_api_data
+        
+        # Priority 2: Try yfinance (Yahoo Finance)
+        logger.info(f"NSE API failed, trying Yahoo Finance for {index_name}...")
+        yf_data = await fetch_nifty_ohlc_from_yfinance(index_name)
+        if yf_data:
+            return yf_data
+        
+        # Priority 3: Try NSEDownload (free, no token needed)
+        logger.info(f"Yahoo Finance failed, trying NSEDownload for {index_name}...")
+        nse_data = await fetch_nifty_ohlc_from_nse(index_name)
+        
+        if nse_data:
+            return nse_data
+        
+        # Fallback to TrueData API if NSEDownload fails
+        if token:
+            logger.info(f"NSEDownload failed, trying TrueData API for {index_name}...")
+            
+            # Get today's date
+            today = datetime.now(timezone.utc)
+            date_str = today.strftime("%Y-%m-%d")
+            
+            # Map index name to TrueData symbol
+            truedata_symbol = "NIFTY" if "50" in index_name else "BANKNIFTY"
+            
+            # Try to fetch historical OHLC data for today
+            historical_data = await fetch_historical_ohlc(token, truedata_symbol, date_str)
+            
+            if historical_data and all([historical_data.get("open"), historical_data.get("high"), 
+                                       historical_data.get("low"), historical_data.get("close")]):
+                # Successfully got OHLC from historical endpoint
+                logger.info(f"✅ Successfully fetched {index_name} OHLC from TrueData historical endpoint: O={historical_data['open']}, H={historical_data['high']}, L={historical_data['low']}, C={historical_data['close']}")
+                return {
+                    "name": index_name,
+                    "date": date_str,
+                    "open": round(float(historical_data["open"]), 2),
+                    "high": round(float(historical_data["high"]), 2),
+                    "low": round(float(historical_data["low"]), 2),
+                    "close": round(float(historical_data["close"]), 2),
+                    "source": "TrueData Historical API",
+                    "imported_at": today.isoformat()
+                }
+            
+            # Fallback: Use LTP and calculate OHLC
+            logger.info("Historical endpoint not available, using LTP fallback method...")
+            close_price = await fetch_ltp_spot(token, truedata_symbol, "XX")
+            
+            if close_price is None:
+                logger.error(f"Failed to fetch {index_name} close price from TrueData")
+                return None
+            
+            # Get previous day's data for open price from nifty_data collection
+            previous_data = await get_previous_nifty_data(index_name)
+            open_price = None
+            
+            if previous_data and previous_data.get("close"):
+                # Use previous day's close as today's open
+                open_price = previous_data.get("close")
+                logger.info(f"Using previous day's close ({open_price}) as today's open")
+            else:
+                # If no previous data, use current price as open
+                open_price = close_price
+                logger.warning("No previous day data found, using current price as open")
+            
+            # For high/low, use current price (since we're fetching at end of day)
+            # In a production system, you'd track intraday high/low throughout the day
+            high_price = max(open_price, close_price) if open_price else close_price
+            low_price = min(open_price, close_price) if open_price else close_price
+            
+            return {
+                "name": index_name,
+                "date": date_str,
+                "open": round(open_price, 2),
+                "high": round(high_price, 2),
+                "low": round(low_price, 2),
+                "close": round(close_price, 2),
+                "source": "TrueData API (LTP fallback)",
+                "imported_at": today.isoformat()
+            }
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching NIFTY OHLC: {str(e)}", exc_info=True)
+        return None
+
+
+async def save_nifty_data_to_db(nifty_data: Dict[str, Any]):
+    """Save NIFTY OHLC data to MongoDB nifty_data collection"""
+    if db is None:
+        logger.warning("MongoDB not initialized - cannot save NIFTY data")
+        return False
+    
+    try:
+        collection = db.nifty_data
+        
+        # Upsert the document using both name and date as unique key
+        query = {
+            "name": nifty_data.get("name", "NIFTY 50"),
+            "date": nifty_data["date"]
+        }
+        
+        result = await collection.update_one(
+            query,
+            {"$set": nifty_data},
+            upsert=True
+        )
+        
+        index_name = nifty_data.get("name", "NIFTY 50")
+        if result.upserted_id:
+            logger.info(f"Created {index_name} data for {nifty_data['date']}: O={nifty_data['open']}, H={nifty_data['high']}, L={nifty_data['low']}, C={nifty_data['close']}")
+        else:
+            logger.info(f"Updated {index_name} data for {nifty_data['date']}: O={nifty_data['open']}, H={nifty_data['high']}, L={nifty_data['low']}, C={nifty_data['close']}")
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error saving NIFTY data to MongoDB: {str(e)}", exc_info=True)
+        return False
+
+
+async def scheduled_nifty_data_collection():
+    """Scheduled function to fetch and save NIFTY OHLC data from TrueData API"""
+    try:
+        logger.info("🕐 Scheduled NIFTY data collection started (3:30 PM IST)")
+        
+        # Get a valid token from database
+        if db is None:
+            logger.warning("MongoDB not available for scheduled NIFTY data collection")
+            return
+        
+        token_doc = await db.tokens.find_one(
+            sort=[("created_at", -1)]
+        )
+        
+        if not token_doc or not token_doc.get("access_token"):
+            logger.warning("No valid token found for scheduled NIFTY data collection")
+            return
+        
+        token = token_doc.get("access_token") if token_doc else None
+        
+        # Fetch data for both indices
+        indices_to_fetch = ["NIFTY 50", "NIFTY BANK"]
+        
+        for index_name in indices_to_fetch:
+            logger.info(f"Fetching {index_name} OHLC data...")
+            index_data = await fetch_nifty_ohlc_from_truedata(index_name, token)
+            
+            if index_data:
+                # Save to MongoDB
+                success = await save_nifty_data_to_db(index_data)
+                if success:
+                    logger.info(f"✅ Successfully saved {index_name} data for {index_data['date']}")
+                else:
+                    logger.error(f"❌ Failed to save {index_name} data to MongoDB")
+            else:
+                logger.error(f"❌ Failed to fetch {index_name} data")
+            
+    except Exception as e:
+        logger.error(f"Error in scheduled NIFTY data collection: {str(e)}", exc_info=True)
+
 
 async def scheduled_end_of_day_save():
     """Scheduled function to save end-of-day data (stocks + option chains)"""
@@ -1337,11 +2078,11 @@ async def scheduled_end_of_day_save():
     except Exception as e:
         logger.error(f"Error in scheduled end-of-day save: {str(e)}", exc_info=True)
 
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize scheduler on startup"""
     # Schedule daily save at 3:30 PM IST (10:00 AM UTC) - typical market close time
-    # Adjust timezone as needed
     scheduler.add_job(
         scheduled_end_of_day_save,
         trigger=CronTrigger(hour=10, minute=0),  # 10:00 AM UTC = 3:30 PM IST
@@ -1349,11 +2090,282 @@ async def startup_event():
         name="Daily End-of-Day Stock Data Save",
         replace_existing=True
     )
+    
+    # Schedule NIFTY data collection at 3:30 PM IST (10:00 AM UTC)
+    scheduler.add_job(
+        scheduled_nifty_data_collection,
+        trigger=CronTrigger(hour=10, minute=0),  # 10:00 AM UTC = 3:30 PM IST
+        id="nifty_data_collection",
+        name="Daily NIFTY Data Collection from TrueData",
+        replace_existing=True
+    )
+    
     scheduler.start()
-    logger.info("Scheduler started - Daily data save scheduled at 10:00 AM UTC (3:30 PM IST)")
+    logger.info("Scheduler started:")
+    logger.info("  - Daily stock data save: 10:00 AM UTC (3:30 PM IST)")
+    logger.info("  - NIFTY data collection: 10:00 AM UTC (3:30 PM IST)")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
     scheduler.shutdown()
     if client is not None:
         client.close()
+
+
+# Nifty data import functions
+GOOGLE_SHEETS_NIFTY_URL = "https://docs.google.com/spreadsheets/d/18Ybife1vGGxLfrlEeYUdpsGhjzIwLRmTYgMd3GYgHbk/export?format=csv&gid=1234653346"
+
+
+def parse_nifty_date(date_str: str) -> Optional[datetime]:
+    """Parse date string in format '1-Sep-10' to datetime"""
+    try:
+        return datetime.strptime(date_str, "%d-%b-%y")
+    except ValueError:
+        try:
+            return datetime.strptime(date_str, "%d-%B-%y")
+        except ValueError:
+            try:
+                # Try DD-MM-YYYY format
+                return datetime.strptime(date_str, "%d-%m-%Y")
+            except ValueError:
+                try:
+                    # Try YYYY-MM-DD format
+                    return datetime.strptime(date_str, "%Y-%m-%d")
+                except ValueError:
+                    logger.warning(f"Could not parse date: {date_str}")
+                    return None
+
+
+def safe_float_nifty(value) -> Optional[float]:
+    """Safely convert value to float, handling strings, None, NaN, etc."""
+    if value is None:
+        return None
+    
+    # Convert to string first to handle various types
+    str_val = str(value).strip()
+    
+    # Check for NaN or empty strings
+    if not str_val or str_val.lower() in ['nan', 'none', 'null', '', '-', 'n/a', 'na']:
+        return None
+    
+    try:
+        # Remove any commas or other formatting
+        str_val = str_val.replace(',', '').replace(' ', '')
+        return float(str_val)
+    except (ValueError, TypeError):
+        return None
+
+
+async def import_nifty_data_from_sheets():
+    """Import Nifty historical data from Google Sheets to MongoDB"""
+    if db is None:
+        raise ValueError("MongoDB not initialized")
+    
+    try:
+        # Fetch data from Google Sheets
+        logger.info("Fetching Nifty data from Google Sheets...")
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as http_client:
+            response = await http_client.get(GOOGLE_SHEETS_NIFTY_URL)
+            response.raise_for_status()
+            
+            # Parse CSV
+            df = pd.read_csv(StringIO(response.text))
+            logger.info(f"Fetched {len(df)} rows from Google Sheets")
+        
+        # Process DataFrame
+        df.columns = df.columns.str.strip()
+        
+        # Find columns (case-insensitive)
+        date_col = None
+        open_col = None
+        high_col = None
+        low_col = None
+        close_col = None
+        
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'date' in col_lower:
+                date_col = col
+            elif 'open' in col_lower:
+                open_col = col
+            elif 'high' in col_lower:
+                high_col = col
+            elif 'low' in col_lower:
+                low_col = col
+            elif 'close' in col_lower:
+                close_col = col
+        
+        if not date_col:
+            raise ValueError("Date column not found in CSV")
+        
+        logger.info(f"Using columns: Date={date_col}, Open={open_col}, High={high_col}, Low={low_col}, Close={close_col}")
+        
+        collection = db.nifty_data
+        inserted_count = 0
+        updated_count = 0
+        
+        for idx, row in df.iterrows():
+            try:
+                date_str = str(row[date_col]).strip()
+                if not date_str or date_str.lower() == 'nan' or date_str.lower() == 'date':
+                    continue
+                
+                date_obj = parse_nifty_date(date_str)
+                if not date_obj:
+                    continue
+                
+                # Extract OHLC values - use safe_float to handle string values properly
+                open_val = safe_float_nifty(row[open_col]) if open_col else None
+                high_val = safe_float_nifty(row[high_col]) if high_col else None
+                low_val = safe_float_nifty(row[low_col]) if low_col else None
+                close_val = safe_float_nifty(row[close_col]) if close_col else None
+                
+                # Store record if we have a valid date (even if some OHLC are None)
+                # This ensures all rows from the sheet are imported
+                
+                document = {
+                    "name": "NIFTY 50",  # historical sheet data is for NIFTY 50 index
+                    "date": date_obj.strftime("%Y-%m-%d"),
+                    "open": open_val,
+                    "high": high_val,
+                    "low": low_val,
+                    "close": close_val,
+                    "imported_at": datetime.now(timezone.utc).isoformat()
+                }
+                
+                result = await collection.update_one(
+                    {"date": document["date"]},
+                    {"$set": document},
+                    upsert=True
+                )
+                
+                if result.upserted_id:
+                    inserted_count += 1
+                else:
+                    updated_count += 1
+                    
+            except Exception as e:
+                logger.warning(f"Error processing row {idx}: {str(e)}")
+                continue
+        
+        total_count = await collection.count_documents({})
+        
+        logger.info(f"Nifty data import complete: {inserted_count} inserted, {updated_count} updated, total: {total_count}")
+        
+        return {
+            "success": True,
+            "inserted": inserted_count,
+            "updated": updated_count,
+            "total": total_count
+        }
+        
+    except Exception as e:
+        logger.error(f"Error importing Nifty data: {str(e)}", exc_info=True)
+        raise
+
+
+@api_router.post("/nifty/import")
+async def import_nifty_data_endpoint():
+    """Import Nifty historical data from Google Sheets to MongoDB"""
+    try:
+        result = await import_nifty_data_from_sheets()
+        return result
+    except Exception as e:
+        logger.error(f"Error in import endpoint: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@api_router.post("/nifty/fetch-from-truedata")
+async def fetch_nifty_from_truedata_endpoint(token: str = Query(None, description="TrueData API token (optional, will use from DB if not provided)")):
+    """Manually trigger NIFTY data fetch for both NIFTY 50 and NIFTY BANK"""
+    try:
+        # Get token from database if not provided
+        if not token and db is not None:
+            token_doc = await db.tokens.find_one(sort=[("created_at", -1)])
+            token = token_doc.get("access_token") if token_doc else None
+        
+        results = {}
+        indices_to_fetch = ["NIFTY 50", "NIFTY BANK"]
+        
+        for index_name in indices_to_fetch:
+            logger.info(f"Fetching {index_name} OHLC data...")
+            index_data = await fetch_nifty_ohlc_from_truedata(index_name, token)
+            
+            if index_data:
+                success = await save_nifty_data_to_db(index_data)
+                if success:
+                    results[index_name] = {
+                        "status": "success",
+                        "data": index_data
+                    }
+                else:
+                    results[index_name] = {
+                        "status": "error",
+                        "message": "Failed to save to database"
+                    }
+            else:
+                results[index_name] = {
+                    "status": "error",
+                    "message": "Failed to fetch data"
+                }
+        
+        return {
+            "success": True,
+            "message": "NIFTY data fetch completed for all indices",
+            "results": results
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in fetch NIFTY endpoint: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+
+@api_router.get("/nifty/data")
+async def get_nifty_data(start_date: Optional[str] = None, end_date: Optional[str] = None, limit: int = 100):
+    """Get Nifty historical data from MongoDB"""
+    if db is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="MongoDB not initialized"
+        )
+    
+    try:
+        collection = db.nifty_data
+        query = {}
+        
+        if start_date:
+            query["date"] = {"$gte": start_date}
+        if end_date:
+            if "date" in query:
+                query["date"]["$lte"] = end_date
+            else:
+                query["date"] = {"$lte": end_date}
+        
+        cursor = collection.find(query).sort("date", -1).limit(limit)
+        documents = []
+        async for doc in cursor:
+            # Remove MongoDB _id for JSON serialization
+            doc.pop("_id", None)
+            documents.append(doc)
+        
+        return {
+            "success": True,
+            "count": len(documents),
+            "data": documents
+        }
+    except Exception as e:
+        logger.error(f"Error fetching Nifty data: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+# Include the router in the main app (after all routes are defined)
+app.include_router(api_router)

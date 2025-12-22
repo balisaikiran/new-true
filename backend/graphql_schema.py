@@ -44,10 +44,13 @@ class NiftyData:
     """Nifty OHLC data type"""
     name: Optional[str] = None
     date: str
+    price: Optional[float] = None  # Close price
     open: Optional[float] = None
     high: Optional[float] = None
     low: Optional[float] = None
     close: Optional[float] = None
+    volume: Optional[float] = None  # Trading volume
+    change_percent: Optional[float] = None  # Change percentage
     imported_at: Optional[str] = None
 
 
@@ -134,10 +137,13 @@ class Query:
             results.append(NiftyData(
                 name=doc.get("name"),
                 date=doc.get("date", ""),
+                price=doc.get("price"),
                 open=doc.get("open"),
                 high=doc.get("high"),
                 low=doc.get("low"),
                 close=doc.get("close"),
+                volume=doc.get("volume"),
+                change_percent=doc.get("change_percent"),
                 imported_at=doc.get("imported_at")
             ))
         
@@ -183,11 +189,15 @@ class Query:
             return None
         
         return NiftyData(
+            name=doc.get("name"),
             date=doc.get("date", ""),
+            price=doc.get("price"),
             open=doc.get("open"),
             high=doc.get("high"),
             low=doc.get("low"),
             close=doc.get("close"),
+            volume=doc.get("volume"),
+            change_percent=doc.get("change_percent"),
             imported_at=doc.get("imported_at")
         )
 
@@ -242,10 +252,13 @@ class Mutation:
                 data=NiftyData(
                     name=document["name"],
                     date=document["date"],
+                    price=document.get("price"),
                     open=document["open"],
                     high=document["high"],
                     low=document["low"],
                     close=document["close"],
+                    volume=document.get("volume"),
+                    change_percent=document.get("change_percent"),
                     imported_at=document["imported_at"]
                 )
             )
@@ -312,10 +325,13 @@ class Mutation:
                 data=NiftyData(
                     name=updated_doc.get("name"),
                     date=updated_doc.get("date", ""),
+                    price=updated_doc.get("price"),
                     open=updated_doc.get("open"),
                     high=updated_doc.get("high"),
                     low=updated_doc.get("low"),
                     close=updated_doc.get("close"),
+                    volume=updated_doc.get("volume"),
+                    change_percent=updated_doc.get("change_percent"),
                     imported_at=updated_doc.get("imported_at")
                 )
             )
@@ -370,10 +386,13 @@ class Mutation:
                 data=NiftyData(
                     name=document["name"],
                     date=document["date"],
+                    price=document.get("price"),
                     open=document["open"],
                     high=document["high"],
                     low=document["low"],
                     close=document["close"],
+                    volume=document.get("volume"),
+                    change_percent=document.get("change_percent"),
                     imported_at=document["imported_at"]
                 )
             )

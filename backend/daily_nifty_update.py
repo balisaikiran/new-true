@@ -2,6 +2,7 @@
 """
 Daily script to fetch and update today's NIFTY 50 and NIFTY BANK OHLC data.
 This script is designed to be run via cron at 3:35 PM IST daily.
+Uses yfinance to fetch all fields: Open, High, Low, Close, Volume, and calculates Change %.
 """
 
 import os
@@ -11,6 +12,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+import yfinance as yf
+import pandas as pd
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -23,90 +26,91 @@ if env_file.exists():
 sys.path.insert(0, str(ROOT_DIR))
 
 
-def fetch_today_nsedownload(index_name: str) -> Optional[Dict[str, Any]]:
+def get_yfinance_symbol(index_name: str) -> str:
+    """Map index name to yfinance symbol"""
+    mapping = {
+        "NIFTY 50": "^NSEI",
+        "NIFTY BANK": "^NSEBANK"
+    }
+    return mapping.get(index_name, "^NSEI")
+
+
+def fetch_today_yfinance(index_name: str) -> Optional[Dict[str, Any]]:
     """
-    Fetch today's OHLC data using NSEDownload.
-    Returns dict with name, date, open, high, low, close or None if failed.
+    Fetch today's OHLC data using yfinance.
+    Returns dict with name, date, open, high, low, close, price, volume, change_percent.
     """
     try:
-        from NSEDownload import indices
-        
+        symbol = get_yfinance_symbol(index_name)
         today = datetime.now()
-        date_str = today.strftime("%d-%m-%Y")
         
-        print(f"  📥 Fetching {index_name} for {date_str} using NSEDownload...")
+        print(f"  📥 Fetching {index_name} ({symbol}) using yfinance...")
         
-        # Fetch today's data
-        df = indices.get_data(
-            index_name=index_name,
-            start_date=date_str,
-            end_date=date_str
-        )
+        # Fetch last 5 days to ensure we get today's data (or most recent)
+        end_date = today.strftime("%Y-%m-%d")
+        start_date = (today - timedelta(days=5)).strftime("%Y-%m-%d")
+        
+        df = yf.download(symbol, start=start_date, end=end_date, progress=False, auto_adjust=True)
         
         if df is None or len(df) == 0:
             # Try previous day if today's data not available yet
             yesterday = today - timedelta(days=1)
-            date_str = yesterday.strftime("%d-%m-%Y")
-            print(f"  ⚠️ Today's data not available, trying {date_str}...")
-            df = indices.get_data(
-                index_name=index_name,
-                start_date=date_str,
-                end_date=date_str
-            )
+            end_date = yesterday.strftime("%Y-%m-%d")
+            start_date = (yesterday - timedelta(days=5)).strftime("%Y-%m-%d")
+            print(f"  ⚠️ Today's data not available, trying {end_date}...")
+            df = yf.download(symbol, start=start_date, end=end_date, progress=False, auto_adjust=True)
             if df is not None and len(df) > 0:
                 today = yesterday
         
         if df is None or len(df) == 0:
-            print(f"  ❌ No data returned from NSEDownload")
+            print(f"  ❌ No data returned from yfinance")
             return None
         
         # Get the last row (most recent data)
         row = df.iloc[-1]
+        date_index = df.index[-1]
         
-        # Extract OHLC
+        # Extract OHLC and Volume
         open_val = None
         high_val = None
         low_val = None
         close_val = None
+        volume_val = None
         
-        for col in df.columns:
-            col_lower = str(col).lower()
-            if 'open' in col_lower and open_val is None:
-                open_val = row[col]
-            elif 'high' in col_lower and high_val is None:
-                high_val = row[col]
-            elif 'low' in col_lower and low_val is None:
-                low_val = row[col]
-            elif 'close' in col_lower and close_val is None:
-                close_val = row[col]
+        try:
+            # Access values directly - row is a Series, so we can use .iloc or direct access
+            # Convert to scalar if needed
+            def safe_float(val):
+                if val is None:
+                    return None
+                try:
+                    # If it's a Series, get first value
+                    if isinstance(val, pd.Series):
+                        val = val.iloc[0] if len(val) > 0 else None
+                    # Convert to float
+                    if val is not None:
+                        fval = float(val)
+                        # Check if it's NaN
+                        if pd.isna(fval):
+                            return None
+                        return fval
+                    return None
+                except (ValueError, TypeError):
+                    return None
+            
+            open_val = safe_float(row.get('Open'))
+            high_val = safe_float(row.get('High'))
+            low_val = safe_float(row.get('Low'))
+            close_val = safe_float(row.get('Close'))
+            volume_val = safe_float(row.get('Volume'))
+        except Exception as e:
+            print(f"  ⚠️ Error extracting values: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
         
-        # Try positional if column names don't match
-        if open_val is None and len(df.columns) >= 5:
-            try:
-                open_val = row.iloc[1] if pd.notna(row.iloc[1]) else None
-                high_val = row.iloc[2] if pd.notna(row.iloc[2]) else None
-                low_val = row.iloc[3] if pd.notna(row.iloc[3]) else None
-                close_val = row.iloc[4] if pd.notna(row.iloc[4]) else None
-            except:
-                pass
-        
-        def safe_float(val):
-            if val is None:
-                return None
-            try:
-                if isinstance(val, str):
-                    val = val.replace(',', '').strip()
-                return float(val)
-            except:
-                return None
-        
-        open_val = safe_float(open_val)
-        high_val = safe_float(high_val)
-        low_val = safe_float(low_val)
-        close_val = safe_float(close_val)
-        
-        if all([open_val, high_val, low_val, close_val]):
-            date_key = today.strftime("%Y-%m-%d")
+        if open_val is not None and high_val is not None and low_val is not None and close_val is not None:
+            date_key = date_index.strftime("%Y-%m-%d")
             return {
                 "name": index_name,
                 "date": date_key,
@@ -114,7 +118,9 @@ def fetch_today_nsedownload(index_name: str) -> Optional[Dict[str, Any]]:
                 "high": round(high_val, 2),
                 "low": round(low_val, 2),
                 "close": round(close_val, 2),
-                "source": "NSEDownload",
+                "price": round(close_val, 2),  # Price = Close
+                "volume": int(volume_val) if volume_val else None,
+                "source": "yfinance",
                 "imported_at": datetime.utcnow().isoformat()
             }
         else:
@@ -122,66 +128,31 @@ def fetch_today_nsedownload(index_name: str) -> Optional[Dict[str, Any]]:
             return None
             
     except ImportError:
-        print(f"  ❌ NSEDownload not installed")
+        print(f"  ❌ yfinance not installed")
         return None
     except Exception as e:
-        print(f"  ❌ Error with NSEDownload: {e}")
+        print(f"  ❌ Error with yfinance: {e}")
         return None
 
 
-async def fetch_today_via_api(index_name: str) -> Optional[Dict[str, Any]]:
-    """
-    Fallback: Fetch today's data using the server's fetch_nifty_ohlc_from_truedata function.
-    """
+async def get_previous_close(collection, index_name: str, current_date: str) -> Optional[float]:
+    """Get previous trading day's close price from MongoDB"""
     try:
-        from server import fetch_nifty_ohlc_from_truedata
-        
-        # Get token from database if available
-        mongo_url = os.environ.get("MONGO_URL")
-        db_name = os.environ.get("DB_NAME")
-        
-        token = None
-        if mongo_url and db_name:
-            try:
-                mongo_url = mongo_url.strip('"').strip("'")
-                db_name = db_name.strip('"').strip("'")
-                if "?" not in mongo_url:
-                    mongo_url += "?tlsAllowInvalidCertificates=true"
-                elif "tlsAllowInvalidCertificates" not in mongo_url:
-                    mongo_url += "&tlsAllowInvalidCertificates=true"
-                
-                client = AsyncIOMotorClient(mongo_url, serverSelectionTimeoutMS=20000)
-                db = client[db_name]
-                token_doc = await db.tokens.find_one(sort=[("created_at", -1)])
-                if token_doc and token_doc.get("access_token"):
-                    token = token_doc.get("access_token")
-                client.close()
-            except:
-                pass
-        
-        print(f"  📥 Fetching {index_name} via API fallback...")
-        data = await fetch_nifty_ohlc_from_truedata(index_name, token)
-        
-        if data:
-            return {
-                "name": index_name,
-                "date": data.get("date"),
-                "open": data.get("open"),
-                "high": data.get("high"),
-                "low": data.get("low"),
-                "close": data.get("close"),
-                "source": data.get("source", "API"),
-                "imported_at": datetime.utcnow().isoformat()
-            }
-        
+        # Find the most recent document before current_date
+        prev_doc = await collection.find_one(
+            {"name": index_name, "date": {"$lt": current_date}},
+            sort=[("date", -1)]
+        )
+        if prev_doc and prev_doc.get("close"):
+            return float(prev_doc["close"])
         return None
     except Exception as e:
-        print(f"  ❌ Error with API fallback: {e}")
+        print(f"  ⚠️ Error getting previous close: {e}")
         return None
 
 
 async def upsert_to_mongodb(collection, doc: Dict[str, Any]) -> bool:
-    """Upsert single document to MongoDB"""
+    """Upsert single document to MongoDB with all fields"""
     try:
         result = await collection.update_one(
             {"name": doc["name"], "date": doc["date"]},
@@ -232,21 +203,35 @@ async def main():
     for index_name in indices:
         print(f"\n📊 Processing {index_name}...")
         
-        # Try NSEDownload first
+        # Fetch data using yfinance
         data = None
         loop = asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, fetch_today_nsedownload, index_name)
-        
-        # Fallback to API if NSEDownload failed
-        if not data:
-            print(f"  ⚠️ NSEDownload failed, trying API fallback...")
-            data = await fetch_today_via_api(index_name)
+        data = await loop.run_in_executor(None, fetch_today_yfinance, index_name)
         
         if data:
+            # Get previous day's close to calculate change %
+            prev_close = await get_previous_close(collection, index_name, data['date'])
+            
+            if prev_close and data.get('close'):
+                # Calculate change percentage: ((current_close - prev_close) / prev_close) * 100
+                change_pct = ((data['close'] - prev_close) / prev_close) * 100
+                data['change_percent'] = round(change_pct, 2)
+                print(f"  📈 Change %: {data['change_percent']:.2f}% (from prev close: {prev_close:.2f})")
+            else:
+                data['change_percent'] = None
+                print(f"  ⚠️ Could not calculate change % (no previous close found)")
+            
+            # Ensure all required fields are present
+            if 'price' not in data:
+                data['price'] = data.get('close')
+            
+            # Upsert to MongoDB
             success = await upsert_to_mongodb(collection, data)
             if success:
                 success_count += 1
-                print(f"  ✅ Updated {index_name} for {data['date']}: O={data['open']:.2f}, H={data['high']:.2f}, L={data['low']:.2f}, C={data['close']:.2f}")
+                vol_str = f", Vol={data['volume']:,}" if data.get('volume') else ""
+                change_str = f", Change%={data['change_percent']:.2f}%" if data.get('change_percent') is not None else ""
+                print(f"  ✅ Updated {index_name} for {data['date']}: O={data['open']:.2f}, H={data['high']:.2f}, L={data['low']:.2f}, C={data['close']:.2f}{vol_str}{change_str}")
             else:
                 print(f"  ❌ Failed to save {index_name} to MongoDB")
         else:
@@ -261,5 +246,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    import pandas as pd  # NSEDownload uses pandas
     asyncio.run(main())

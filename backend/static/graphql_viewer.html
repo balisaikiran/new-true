@@ -346,6 +346,16 @@
     changePercent
   }
 }</textarea>
+                <div class="form-row" style="margin-top: 12px;">
+                    <div>
+                        <label for="index-select">Index filter (optional)</label>
+                        <select id="index-select">
+                            <option value="">All</option>
+                            <option value="NIFTY 50">NIFTY 50</option>
+                            <option value="NIFTY BANK">NIFTY BANK</option>
+                        </select>
+                    </div>
+                </div>
             </div>
             
             <div class="query-presets">
@@ -498,12 +508,21 @@
         }
         
         async function executeQuery() {
-            const query = document.getElementById('query').value.trim();
+            let query = document.getElementById('query').value.trim();
             const resultsDiv = document.getElementById('results');
+            const indexFilter = document.getElementById('index-select').value.trim();
             
             if (!query) {
                 resultsDiv.innerHTML = '<div class="error">Please enter a GraphQL query</div>';
                 return;
+            }
+
+            // If an index filter is selected and the query has niftyData(...) without name:, inject name: "..."
+            if (indexFilter) {
+                const hasNameArg = /niftyData\s*\([^)]*name\s*:/;
+                if (query.includes('niftyData(') && !hasNameArg.test(query)) {
+                    query = query.replace(/niftyData\s*\(/, match => `${match}name: "${indexFilter}", `);
+                }
             }
             
             resultsDiv.innerHTML = '<div class="loading">⏳ Executing query...</div>';

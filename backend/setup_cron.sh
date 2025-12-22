@@ -3,7 +3,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_PATH="$SCRIPT_DIR/.venv/bin/python3"
-SCRIPT_PATH="$SCRIPT_DIR/daily_nifty_update.py"
+SCRIPT_PATH="$SCRIPT_DIR/daily_nifty_update_nse.py"
 LOG_PATH="$SCRIPT_DIR/logs/daily_nifty_update.log"
 
 # Create logs directory if it doesn't exist
@@ -37,4 +37,4 @@ echo ""
 echo "To test the script manually:"
 echo "  cd $SCRIPT_DIR"
 echo "  source .venv/bin/activate"
-echo "  python3 daily_nifty_update.py"
+echo "  python3 daily_nifty_update_nse.py"

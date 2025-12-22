@@ -335,11 +335,15 @@
                 <label for="query">GraphQL Query:</label>
                 <textarea id="query" placeholder="Enter your GraphQL query here...">query {
   niftyData(limit: 10) {
+    name
     date
+    price
     open
     high
     low
     close
+    volume
+    changePercent
   }
 }</textarea>
             </div>
@@ -430,25 +434,31 @@
     <script>
         const GRAPHQL_URL = '/graphql';
         
-const presets = {
+        const presets = {
             latest: `query {
   niftyData(limit: 10) {
     name
     date
+    price
     open
     high
     low
     close
+    volume
+    changePercent
   }
 }`,
             dateRange: `query {
   niftyData(startDate: "2025-12-01", endDate: "2025-12-04") {
     name
     date
+    price
     open
     high
     low
     close
+    volume
+    changePercent
   }
 }`,
             count: `query {
@@ -458,10 +468,13 @@ const presets = {
   niftyDataByDate(date: "2025-12-04") {
     name
     date
+    price
     open
     high
     low
     close
+    volume
+    changePercent
   }
 }`
         };
@@ -577,10 +590,13 @@ const presets = {
                             <tr>
                                 <th>Name</th>
                                 <th>Date</th>
+                                <th>Price</th>
                                 <th>Open</th>
                                 <th>High</th>
                                 <th>Low</th>
                                 <th>Close</th>
+                                <th>Volume</th>
+                                <th>Change %</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -588,10 +604,13 @@ const presets = {
                                 <tr>
                                     <td>${item.name || 'N/A'}</td>
                                     <td><strong>${item.date || 'N/A'}</strong></td>
+                                    <td>${formatNumber(item.price ?? item.close)}</td>
                                     <td>${formatNumber(item.open)}</td>
                                     <td>${formatNumber(item.high)}</td>
                                     <td>${formatNumber(item.low)}</td>
                                     <td><strong>${formatNumber(item.close)}</strong></td>
+                                    <td>${item.volume != null ? item.volume.toLocaleString('en-US') : 'N/A'}</td>
+                                    <td>${item.changePercent != null ? item.changePercent.toFixed(2) + '%' : 'N/A'}</td>
                                 </tr>
                             `).join('')}
                         </tbody>
@@ -786,20 +805,28 @@ const presets = {
                         <table>
                             <thead>
                                 <tr>
+                                    <th>Name</th>
                                     <th>Date</th>
+                                    <th>Price</th>
                                     <th>Open</th>
                                     <th>High</th>
                                     <th>Low</th>
                                     <th>Close</th>
+                                    <th>Volume</th>
+                                    <th>Change %</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <tr>
+                                    <td>${data.name || 'N/A'}</td>
                                     <td><strong>${data.date || 'N/A'}</strong></td>
+                                    <td>${formatNumber(data.price ?? data.close)}</td>
                                     <td>${formatNumber(data.open)}</td>
                                     <td>${formatNumber(data.high)}</td>
                                     <td>${formatNumber(data.low)}</td>
                                     <td><strong>${formatNumber(data.close)}</strong></td>
+                                    <td>${data.volume != null ? data.volume.toLocaleString('en-US') : 'N/A'}</td>
+                                    <td>${data.changePercent != null ? data.changePercent.toFixed(2) + '%' : 'N/A'}</td>
                                 </tr>
                             </tbody>
                         </table>

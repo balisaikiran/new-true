@@ -2367,5 +2367,123 @@ async def get_nifty_data(start_date: Optional[str] = None, end_date: Optional[st
             detail=str(e)
         )
 
+
+@api_router.post("/nifty/refresh-today")
+async def refresh_today_nifty_data(
+    index_name: Optional[str] = Query(None, description="Index name: 'NIFTY 50' or 'NIFTY BANK'. If not provided, refreshes both."),
+    token: Optional[str] = Query(None, description="TrueData API token (optional, will use from DB if not provided)")
+):
+    """
+    Refresh today's NIFTY data for the specified index (or both if not specified).
+    This endpoint can be called manually at any time, independent of cron schedules.
+    
+    Fetches the latest data from multiple sources (NSE API, yfinance, NSEDownload, TrueData)
+    and updates/creates the record for today's date in the database.
+    
+    Returns:
+        - success: bool
+        - message: str
+        - results: dict with status and data for each index
+    """
+    try:
+        if db is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="MongoDB not initialized"
+            )
+        
+        # Get token from database if not provided
+        if not token:
+            token_doc = await db.tokens.find_one(sort=[("created_at", -1)])
+            token = token_doc.get("access_token") if token_doc else None
+        
+        # Determine which indices to refresh
+        if index_name:
+            if index_name not in ["NIFTY 50", "NIFTY BANK"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid index name: {index_name}. Must be 'NIFTY 50' or 'NIFTY BANK'"
+                )
+            indices_to_refresh = [index_name]
+        else:
+            indices_to_refresh = ["NIFTY 50", "NIFTY BANK"]
+        
+        # Get today's date
+        today = datetime.now(timezone.utc)
+        today_str = today.strftime("%Y-%m-%d")
+        
+        results = {}
+        
+        for idx_name in indices_to_refresh:
+            logger.info(f"🔄 Refreshing today's data for {idx_name} (date: {today_str})...")
+            
+            try:
+                # Fetch today's data using the same function as scheduled jobs
+                index_data = await fetch_nifty_ohlc_from_truedata(idx_name, token)
+                
+                if index_data:
+                    # Ensure the date is set to today
+                    index_data["date"] = today_str
+                    index_data["name"] = idx_name
+                    
+                    # Save/update in database
+                    success = await save_nifty_data_to_db(index_data)
+                    
+                    if success:
+                        results[idx_name] = {
+                            "status": "success",
+                            "message": f"Successfully refreshed {idx_name} data for {today_str}",
+                            "data": {
+                                "date": index_data["date"],
+                                "open": index_data.get("open"),
+                                "high": index_data.get("high"),
+                                "low": index_data.get("low"),
+                                "close": index_data.get("close"),
+                                "price": index_data.get("price"),
+                                "volume": index_data.get("volume"),
+                                "source": index_data.get("source", "unknown")
+                            }
+                        }
+                        logger.info(f"✅ Successfully refreshed {idx_name} data for {today_str}")
+                    else:
+                        results[idx_name] = {
+                            "status": "error",
+                            "message": f"Failed to save {idx_name} data to database"
+                        }
+                        logger.error(f"❌ Failed to save {idx_name} data to database")
+                else:
+                    results[idx_name] = {
+                        "status": "error",
+                        "message": f"Failed to fetch {idx_name} data from any source"
+                    }
+                    logger.error(f"❌ Failed to fetch {idx_name} data from any source")
+                    
+            except Exception as e:
+                logger.error(f"Error refreshing {idx_name} data: {str(e)}", exc_info=True)
+                results[idx_name] = {
+                    "status": "error",
+                    "message": f"Error refreshing {idx_name} data: {str(e)}"
+                }
+        
+        # Determine overall success
+        all_success = all(r.get("status") == "success" for r in results.values())
+        
+        return {
+            "success": all_success,
+            "message": f"Refresh completed for {len(indices_to_refresh)} index(es)",
+            "date": today_str,
+            "results": results
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in refresh today NIFTY endpoint: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error refreshing today's data: {str(e)}"
+        )
+
+
 # Include the router in the main app (after all routes are defined)
 app.include_router(api_router)

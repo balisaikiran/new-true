@@ -21,8 +21,8 @@ VENV_LOCATIONS=(
     "$PROJECT_ROOT/venv"
     "$PROJECT_ROOT/backend/.venv"
     "$PROJECT_ROOT/backend/venv"
-    "$PROJECT_ROOT/backend/backend/.venv"
-    "$PROJECT_ROOT/backend/backend/venv"
+    "$PROJECT_ROOT/backend/.venv"
+    "$PROJECT_ROOT/backend/venv"
     "$HOME/.venv"
     "$HOME/venv"
 )

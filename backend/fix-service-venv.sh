@@ -5,7 +5,7 @@
 
 set -e
 
-VENV_PATH="/home/ubuntu/new-true/backend/backend/.venv"
+VENV_PATH="/home/ubuntu/new-true/backend/.venv"
 
 echo "🔧 Fixing systemd service with venv path: $VENV_PATH"
 

@@ -22,23 +22,92 @@ else
 fi
 
 echo "📁 Detected project directory: $PROJECT_ROOT"
+echo "📁 Backend directory: $BACKEND_DIR"
 echo "👤 Using user: $USER"
-
-# Check if virtual environment exists
-if [ ! -d "$BACKEND_DIR/venv" ]; then
-    echo "❌ Virtual environment not found at $BACKEND_DIR/venv"
-    echo "   Please create it first: python3 -m venv venv"
-    exit 1
-fi
 
 # Check if server.py exists
 if [ ! -f "$BACKEND_DIR/server.py" ]; then
     echo "❌ server.py not found at $BACKEND_DIR/server.py"
+    echo "   Current directory: $(pwd)"
+    echo "   Please run this script from the backend directory or ensure server.py exists"
     exit 1
 fi
 
+# Find Python executable and virtual environment
+PYTHON_EXEC=""
+VENV_DIR=""
+
+# Check common venv locations
+VENV_LOCATIONS=(
+    "$BACKEND_DIR/venv"
+    "$PROJECT_ROOT/venv"
+    "$PROJECT_ROOT/backend/venv"
+    "$HOME/venv"
+)
+
+echo "🔍 Looking for virtual environment..."
+for venv_path in "${VENV_LOCATIONS[@]}"; do
+    if [ -d "$venv_path" ] && [ -f "$venv_path/bin/python3" ]; then
+        VENV_DIR="$venv_path"
+        PYTHON_EXEC="$venv_path/bin/python3"
+        echo "✅ Found virtual environment at: $VENV_DIR"
+        break
+    fi
+done
+
+# If venv not found, create one automatically
+if [ -z "$PYTHON_EXEC" ]; then
+    echo "⚠️  Virtual environment not found in common locations"
+    
+    # Check if system python3 is available
+    if command -v python3 &> /dev/null; then
+        SYSTEM_PYTHON=$(which python3)
+        echo "💡 Found system Python at: $SYSTEM_PYTHON"
+        echo "📦 Creating virtual environment at $BACKEND_DIR/venv..."
+        
+        python3 -m venv "$BACKEND_DIR/venv"
+        VENV_DIR="$BACKEND_DIR/venv"
+        PYTHON_EXEC="$VENV_DIR/bin/python3"
+        
+        if [ ! -f "$PYTHON_EXEC" ]; then
+            echo "❌ Failed to create virtual environment"
+            exit 1
+        fi
+        
+        echo "📥 Installing dependencies..."
+        "$PYTHON_EXEC" -m pip install --upgrade pip --quiet
+        if [ -f "$BACKEND_DIR/requirements.txt" ]; then
+            echo "   Installing from requirements.txt..."
+            "$PYTHON_EXEC" -m pip install -r "$BACKEND_DIR/requirements.txt" --quiet
+        else
+            echo "   requirements.txt not found, installing uvicorn and fastapi..."
+            "$PYTHON_EXEC" -m pip install uvicorn fastapi --quiet
+        fi
+        echo "✅ Virtual environment created and dependencies installed"
+    else
+        echo "❌ Python3 not found. Please install Python3 first."
+        exit 1
+    fi
+fi
+
+# Verify Python executable exists
+if [ ! -f "$PYTHON_EXEC" ]; then
+    echo "❌ Python executable not found at: $PYTHON_EXEC"
+    exit 1
+fi
+
+echo "🐍 Using Python: $PYTHON_EXEC"
+
 # Create systemd service file
 SERVICE_FILE="/tmp/nifty-backend.service"
+
+# Set PATH based on whether venv exists
+if [ -n "$VENV_DIR" ]; then
+    ENV_PATH="$VENV_DIR/bin:/usr/local/bin:/usr/bin:/bin"
+else
+    ENV_PATH="/usr/local/bin:/usr/bin:/bin"
+fi
+
 cat > "$SERVICE_FILE" << EOF
 [Unit]
 Description=Nifty Backend FastAPI Server
@@ -48,8 +117,8 @@ After=network.target
 Type=simple
 User=$USER
 WorkingDirectory=$BACKEND_DIR
-Environment="PATH=$BACKEND_DIR/venv/bin:/usr/local/bin:/usr/bin:/bin"
-ExecStart=$BACKEND_DIR/venv/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
+Environment="PATH=$ENV_PATH"
+ExecStart=$PYTHON_EXEC -m uvicorn server:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=10
 StandardOutput=journal

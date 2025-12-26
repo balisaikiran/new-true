@@ -13,9 +13,17 @@ BACKEND_DIR="$SCRIPT_DIR"
 PROJECT_ROOT="$(dirname "$BACKEND_DIR")"
 
 VENV_LOCATIONS=(
+    "$BACKEND_DIR/.venv"
     "$BACKEND_DIR/venv"
+    "$BACKEND_DIR/backend/.venv"
+    "$BACKEND_DIR/backend/venv"
+    "$PROJECT_ROOT/.venv"
     "$PROJECT_ROOT/venv"
+    "$PROJECT_ROOT/backend/.venv"
     "$PROJECT_ROOT/backend/venv"
+    "$PROJECT_ROOT/backend/backend/.venv"
+    "$PROJECT_ROOT/backend/backend/venv"
+    "$HOME/.venv"
     "$HOME/venv"
 )
 

@@ -37,11 +37,19 @@ fi
 PYTHON_EXEC=""
 VENV_DIR=""
 
-# Check common venv locations
+# Check common venv locations (including .venv variants)
 VENV_LOCATIONS=(
+    "$BACKEND_DIR/.venv"
     "$BACKEND_DIR/venv"
+    "$BACKEND_DIR/backend/.venv"
+    "$BACKEND_DIR/backend/venv"
+    "$PROJECT_ROOT/.venv"
     "$PROJECT_ROOT/venv"
+    "$PROJECT_ROOT/backend/.venv"
     "$PROJECT_ROOT/backend/venv"
+    "$PROJECT_ROOT/backend/backend/.venv"
+    "$PROJECT_ROOT/backend/backend/venv"
+    "$HOME/.venv"
     "$HOME/venv"
 )
 

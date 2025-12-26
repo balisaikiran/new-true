@@ -1,0 +1,23 @@
+[Unit]
+Description=Nifty Backend FastAPI Server
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/app-main-2/backend
+Environment="PATH=/home/ubuntu/app-main-2/backend/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/ubuntu/app-main-2/backend/venv/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nifty-backend
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+

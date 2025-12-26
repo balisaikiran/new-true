@@ -51,6 +51,22 @@ for venv_path in "${VENV_LOCATIONS[@]}"; do
         VENV_DIR="$venv_path"
         PYTHON_EXEC="$venv_path/bin/python3"
         echo "✅ Found virtual environment at: $VENV_DIR"
+        
+        # Check if uvicorn is installed, if not install dependencies
+        if ! "$PYTHON_EXEC" -m pip show uvicorn &> /dev/null; then
+            echo "⚠️  uvicorn not found in venv, installing dependencies..."
+            "$PYTHON_EXEC" -m pip install --upgrade pip --quiet
+            if [ -f "$BACKEND_DIR/requirements.txt" ]; then
+                echo "   Installing from requirements.txt..."
+                "$PYTHON_EXEC" -m pip install -r "$BACKEND_DIR/requirements.txt" --quiet
+            else
+                echo "   requirements.txt not found, installing uvicorn and fastapi..."
+                "$PYTHON_EXEC" -m pip install uvicorn fastapi --quiet
+            fi
+            echo "✅ Dependencies installed"
+        else
+            echo "✅ Dependencies already installed"
+        fi
         break
     fi
 done
